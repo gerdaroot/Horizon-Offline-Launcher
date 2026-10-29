@@ -17,6 +17,26 @@ env:
   HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
 
 jobs:
+  # The tests run once, on Linux: some of upstream's tests depend on the machine (the trash on
+  # Windows, macOS on a hosted runner), and a build never waits for them.
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: launcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+      - name: Libraries GPUI links to
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+      - run: cargo test --release --locked
+
   build:
     name: ${{ matrix.name }}
     strategy:
@@ -65,7 +85,6 @@ jobs:
       - name: Version from the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: echo "HORIZON_LAUNCHER_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      - run: cargo test --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - name: Package
         run: |
@@ -81,7 +100,7 @@ jobs:
           path: dist/${{ matrix.asset }}
 
   release:
-    needs: build
+    needs: [test, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
