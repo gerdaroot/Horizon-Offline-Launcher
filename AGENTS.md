@@ -2,7 +2,7 @@
 
 ## This repository is a fork
 
-This is **Horizon Offline Launcher** (`gerdaroot/horizon-offline-launcher`), a fork of
+This is **Horizon Offline Launcher** (`gerdaroot/Horizon-Offline-Launcher`), a fork of
 [Horizon](https://github.com/horizon-rust/horizon). The fork changes the launcher only:
 
 - Playing needs no Microsoft account (`launcher/src/account.rs`: `launch` never refuses;

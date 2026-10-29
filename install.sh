@@ -1,12 +1,12 @@
 #!/bin/sh
 # Installs Horizon Offline Launcher on Linux (x86-64) or macOS (Apple Silicon), for this user only.
-#   curl -fsSL https://github.com/gerdaroot/horizon-offline-launcher/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/install.sh | sh
 # Linux: ~/.local/share/horizon-offline-launcher, `horizon-offline-launcher` in ~/.local/bin, and
 # the launcher adds itself to the applications menu when it first starts.
 # macOS: ~/Applications/Horizon Offline Launcher/, `horizon-offline-launcher` in ~/.local/bin.
 set -eu
 
-REPO="gerdaroot/horizon-offline-launcher"
+REPO="gerdaroot/Horizon-Offline-Launcher"
 BASE="https://github.com/$REPO/releases/latest/download"
 
 case "$(uname -s)" in
