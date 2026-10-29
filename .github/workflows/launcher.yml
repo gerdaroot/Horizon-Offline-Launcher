@@ -1,0 +1,103 @@
+# Horizon Offline Launcher: tests on every push and pull request; a tag `v1.2.3` builds the
+# launcher for Windows, Linux and macOS and publishes them as a GitHub release.
+name: launcher
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HORIZON_TELEMETRY_URL: "off"
+  HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            binary: horizon-launcher.exe
+            asset: horizon-offline-launcher-windows-x64.exe
+            rustflags: -C target-feature=+crt-static
+          - name: linux
+            os: ubuntu-22.04
+            binary: horizon-launcher
+            asset: horizon-offline-launcher-linux-x86_64.tar.gz
+          - name: macos
+            os: macos-14
+            binary: horizon-launcher
+            asset: horizon-offline-launcher-macos-arm64.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+      - name: Linux libraries GPUI links to
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+      - name: Metal shaders at run time without the Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun metal --version > /dev/null 2>&1; then
+            echo "LAUNCHER_FEATURES=gpui/runtime_shaders" >> "$GITHUB_ENV"
+          fi
+      # A tag v1.2.3 is the launcher's version 1.2.3; other builds say Cargo.toml's.
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "HORIZON_LAUNCHER_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - run: cargo test --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Package
+        run: |
+          mkdir -p ../dist
+          case "${{ matrix.name }}" in
+            windows) cp target/release/${{ matrix.binary }} ../dist/${{ matrix.asset }} ;;
+            linux) tar -czf ../dist/${{ matrix.asset }} -C target/release ${{ matrix.binary }} ;;
+            macos) (cd target/release && zip -q ../../../dist/${{ matrix.asset }} ${{ matrix.binary }}) ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            install.ps1
+            install.sh
+          generate_release_notes: true

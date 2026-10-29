@@ -1,0 +1,5 @@
+#!/bin/sh
+# python3, else python (on Windows, python3 is often only the Microsoft Store alias).
+py=python3
+"$py" -c "" 2>/dev/null || py=python
+exec "$py" tools/check_public_tree.py
