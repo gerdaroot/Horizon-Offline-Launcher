@@ -45,7 +45,7 @@ jobs:
             # The C runtime linked in, so the game runs without the Visual C++ redistributable.
             rustflags: -C target-feature=+crt-static
           - name: macos
-            os: macos-14
+            os: macos-15
             asset: horizon-macos-arm64.zip
             client: horizon-client
     runs-on: ${{ matrix.os }}

@@ -55,7 +55,7 @@ jobs:
             binary: horizon-launcher
             asset: horizon-launcher-linux-x86_64.tar.gz
           - name: macos
-            os: macos-14
+            os: macos-15
             binary: horizon-launcher
             asset: horizon-launcher-macos-arm64.zip
     runs-on: ${{ matrix.os }}
