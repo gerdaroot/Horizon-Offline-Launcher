@@ -113,10 +113,15 @@ pub(crate) fn get(url: &str) -> Result<ureq::Response, String> {
     })
 }
 
+/// This fork's first launcher releases, tagged like game releases before `launcher@` tags: they hold
+/// no game and stay published, so they are never game versions.
+const OLD_FORK_LAUNCHER_TAGS: [&str; 2] = ["v1.0.0", "v1.0.1"];
+
 /// A Horizon game tag: `v` then a digit (`v2026.10.13`). Launcher tags never match.
 pub fn is_game_tag(tag: &str) -> bool {
     tag.strip_prefix('v')
         .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        && !OLD_FORK_LAUNCHER_TAGS.contains(&tag)
 }
 
 /// The launcher version in a `launcher@X.Y.Z` (or `launcher-vX.Y.Z`) tag, or None for any other tag.
@@ -2980,6 +2985,7 @@ mod tests {
         assert_eq!(launcher_version("launcher@0.2.0"), Some("0.2.0"));
         assert!(!is_game_tag("launcher@0.2.0"));
         assert!(is_game_tag("v0.2.0"));
+        assert!(!is_game_tag("v1.0.1"));
         assert!(is_launcher_tag("launcher@0.2.0"));
         assert_eq!(launcher_version("v2026.10.13"), None);
         assert_eq!(launcher_version("launcher-vx"), None);
