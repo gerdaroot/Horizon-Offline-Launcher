@@ -2,7 +2,7 @@
 //! zlib compression above a threshold (CompressionEncoder / CompressionDecoder).
 use crate::{
     Error, Result,
-    buf::{Reader, varint_size, write_varint},
+    buf::{Reader, write_varint},
 };
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use std::io::Write;
@@ -98,7 +98,9 @@ pub fn decompress(frame: Vec<u8>, threshold: Option<usize>) -> Result<Vec<u8>> {
             "Badly compressed packet - size of {size} is larger than protocol maximum"
         )));
     }
-    let start = varint_size(size as i32);
+    // Where the VarInt ended, not its shortest length: some proxies pad it (`a4 a0 00`), and
+    // vanilla's readVarInt takes that.
+    let start = r.position();
     // Like vanilla's Inflater: exactly the declared size, and no more. Vanilla never reads the
     // stream's end (its final block and checksum), which some servers' proxies leave out.
     let mut out = vec![0u8; size];
@@ -181,6 +183,17 @@ mod tests {
         write_varint(&mut frame, 300);
         frame.extend([0xFF; 40]);
         assert!(decompress(frame, Some(256)).is_err());
+    }
+
+    #[test]
+    fn padded_size_varints_decode_like_vanilla() {
+        let body: Vec<u8> = (0..4132u32).map(|i| (i % 13) as u8).collect();
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&body).unwrap();
+        // 4132 in three bytes, as FunTime's proxy writes it.
+        let mut frame = vec![0xa4, 0xa0, 0x00];
+        frame.extend(z.finish().unwrap());
+        assert_eq!(decompress(frame, Some(256)).unwrap(), body);
     }
 
     #[test]
