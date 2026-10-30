@@ -249,8 +249,8 @@ minimize, maximize/restore and close; macOS and Linux keep their system title ba
 The launcher looks for a newer Horizon release when it starts and every 30 minutes while it
 is open, and shows a small "available, Install" line on Play.
 
-The launcher never replaces itself (`backend::self_update_allowed`): an upstream release would
-bring back its account requirement. Update it by building it again from this repository.
+The launcher replaces itself with newer `launcher@` releases of this repository
+(`backend::REPO`), never with upstream's, whose account requirement would come back.
 
 On Linux a release build that starts writes its applications-menu entry only when there is
 none, or when the program the entry starts (its `TryExec`, else its `Exec`) no longer exists.

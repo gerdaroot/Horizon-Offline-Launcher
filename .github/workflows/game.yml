@@ -1,0 +1,142 @@
+# The game, as the launcher installs it: a tag `v0.2.97` builds this fork's horizon-client for
+# Windows, Linux and macOS and puts it into Horizon's own release of the same version (its
+# exporters, horizon-prepare and the rest come from there, built from Mojang's jars on upstream's
+# private runner), then signs the checksums and publishes them. The launcher's own release stays
+# GitHub's "latest", where install.ps1 and install.sh download from.
+name: game
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release to make (v0.2.97); the tag must exist
+        required: true
+      upstream:
+        description: Horizon's release whose files the client goes into (empty for the same tag)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  UPSTREAM: ${{ inputs.upstream || inputs.tag || github.ref_name }}
+  HORIZON_TELEMETRY_URL: "off"
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            asset: horizon-linux-x86_64.tar.gz
+            client: horizon-client
+            # Upstream's server build, unchanged: packaging/server/install.sh installs it on Linux.
+            server_asset: horizon-server-linux-x86_64.tar.gz
+          - name: windows
+            os: windows-latest
+            asset: horizon-windows-x64.zip
+            client: horizon-client.exe
+            # The C runtime linked in, so the game runs without the Visual C++ redistributable.
+            rustflags: -C target-feature=+crt-static
+          - name: macos
+            os: macos-14
+            asset: horizon-macos-arm64.zip
+            client: horizon-client
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: game-${{ matrix.name }}
+      - name: ALSA and udev headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - name: Build the client
+        # `horizon-client/mods`: every released game runs code mods (the feature is off in dev builds).
+        run: |
+          export HORIZON_VERSION="${TAG#v}"
+          cargo build --release --locked --features horizon-client/mods -p horizon-client --bin horizon-client
+      - name: Horizon's release of the same version
+        run: |
+          mkdir -p upstream dist
+          base="https://github.com/horizon-rust/horizon/releases/download/$UPSTREAM"
+          curl -fsSL --retry 3 -o "upstream/${{ matrix.asset }}" "$base/${{ matrix.asset }}"
+          if [[ -n "${{ matrix.server_asset }}" ]]; then
+            curl -fsSL --retry 3 -o "dist/${{ matrix.server_asset }}" "$base/${{ matrix.server_asset }}"
+          fi
+      - name: Put this fork's client in it
+        run: |
+          set -euo pipefail
+          cd upstream
+          case "${{ matrix.asset }}" in
+            *.tar.gz) tar -xzf "${{ matrix.asset }}" ;;
+            *) unzip -q "${{ matrix.asset }}" ;;
+          esac
+          rm "${{ matrix.asset }}"
+          found=$(find . -type f -name "${{ matrix.client }}" | head -1)
+          [[ -n "$found" ]] || { echo "::error::Horizon's ${{ matrix.asset }} has no ${{ matrix.client }}"; exit 1; }
+          cp "../target/release/${{ matrix.client }}" "$found"
+          chmod +x "$found"
+          # Upstream's Developer ID signature belonged to its own binary: sign this one ad hoc, as
+          # Apple Silicon runs nothing unsigned.
+          if [[ "$RUNNER_OS" == macOS ]]; then codesign --force --sign - "$found"; fi
+          top=$(dirname "$found" | cut -d/ -f2)
+          case "${{ matrix.asset }}" in
+            *.tar.gz) tar -czf "../dist/${{ matrix.asset }}" "$top" ;;
+            *) if [[ "$RUNNER_OS" == Windows ]]; then 7z a -tzip "../dist/${{ matrix.asset }}" "$top" > /dev/null
+               else ditto -c -k --norsrc --noextattr --noqtn --keepParent "$top" "../dist/${{ matrix.asset }}"; fi ;;
+          esac
+          ls -l ../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: game-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig)
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          [[ -n "$RELEASE_SIGNING_KEY" ]] || { echo "::error::The RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          bash tools/ci/sign_release.sh "$TAG" dist/*
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The signature, checked as launchers check it
+        run: cargo run --locked --quiet -p horizon-release-sign -- verify --tag "$TAG" dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Horizon ${{ env.TAG }} (offline build)
+          body: |
+            Horizon ${{ env.TAG }} with this fork's game client (fixes such as joining FunTime), in
+            Horizon's own ${{ env.UPSTREAM }} release files. Horizon Offline Launcher installs it by
+            itself; there is nothing to download here by hand.
+          files: dist/*
+          make_latest: false

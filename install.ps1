@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = "gerdaroot/Horizon-Offline-Launcher"
-$Asset = "horizon-offline-launcher-windows-x64.exe"
+$Asset = "horizon-launcher-windows-x64.zip"
 $Name = "Horizon Offline Launcher"
 $Dir = Join-Path $env:LOCALAPPDATA "Programs\HorizonOfflineLauncher"
 $Target = Join-Path $Dir "horizon-offline-launcher.exe"
@@ -47,9 +47,16 @@ if ($Exe) {
     $url = "https://github.com/$Repo/releases/latest/download/$Asset"
     Say "Downloading the latest release"
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $partial = "$Target.partial"
-    Invoke-WebRequest -Uri $url -OutFile $partial -UseBasicParsing
-    Move-Item $partial $Target -Force
+    $work = Join-Path $env:TEMP "horizon-offline-launcher-install"
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $zip = Join-Path $work $Asset
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    Expand-Archive $zip -DestinationPath $work -Force
+    $new = Get-ChildItem $work -Recurse -Filter "horizon-launcher.exe" | Select-Object -First 1
+    if (-not $new) { throw "The download has no horizon-launcher.exe" }
+    Move-Item $new.FullName $Target -Force
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 # Downloaded files carry a "from the internet" mark that makes Windows ask before each start.
 Unblock-File $Target -ErrorAction SilentlyContinue

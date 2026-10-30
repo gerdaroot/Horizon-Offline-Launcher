@@ -11,11 +11,11 @@ BASE="https://github.com/$REPO/releases/latest/download"
 
 case "$(uname -s)" in
   Linux)
-    ASSET="horizon-offline-launcher-linux-x86_64.tar.gz"
+    ASSET="horizon-launcher-linux-x86_64.tar.gz"
     DIR="${XDG_DATA_HOME:-$HOME/.local/share}/horizon-offline-launcher"
     ;;
   Darwin)
-    ASSET="horizon-offline-launcher-macos-arm64.zip"
+    ASSET="horizon-launcher-macos-arm64.zip"
     DIR="$HOME/Applications/Horizon Offline Launcher"
     ;;
   *)

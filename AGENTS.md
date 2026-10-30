@@ -11,10 +11,14 @@ This is **Horizon Offline Launcher** (`gerdaroot/Horizon-Offline-Launcher`), a f
 - The player can pick the client jar (`Settings::minecraft_jar`, `sources::from_jar`, the
   "Choose jar…" row on Home, `horizon-launcher settings minecraft-jar PATH`). Only the pinned 26.3
   release jar is accepted (its sha1 is in `research-lock.json`).
-- The launcher never updates itself (`backend::self_update_allowed`). Game releases still come from
-  upstream's `horizon-rust/horizon` (`backend::REPO`).
-- Install: `install.ps1`, `install.sh`, `build.ps1` at the root; CI and releases:
-  `.github/workflows/launcher.yml` (a `v*` tag publishes a release).
+- Updates come only from this fork (`backend::REPO`, also `horizon-server`'s update.rs), signed with
+  its own key (`crates/horizon-release-sign/release-keys.txt`; the private key is the repository's
+  `RELEASE_SIGNING_KEY` secret). The launcher updates itself unless `HORIZON_LAUNCHER_NO_SELF_UPDATE=1`.
+- Releases: a `launcher@X.Y.Z` tag runs `.github/workflows/launcher.yml` (the launcher, GitHub's
+  "latest" release, with install.ps1 and install.sh); a `vX.Y.Z` tag runs `.github/workflows/game.yml`,
+  which builds this fork's horizon-client and puts it into upstream's release of the same version
+  (exporters and the rest come from there). Tag the game with the upstream version it is merged up to.
+- Install: `install.ps1`, `install.sh`, `build.ps1` at the root.
 
 Upstream's process rules below (Ludovic's attribution lines, PR labels, release batches, the parity
 harnesses) are about upstream's repository; in this fork, commits and PRs carry no agent

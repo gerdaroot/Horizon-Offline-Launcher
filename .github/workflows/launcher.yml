@@ -1,11 +1,12 @@
-# Horizon Offline Launcher: tests on every push and pull request; a tag `v1.2.3` builds the
-# launcher for Windows, Linux and macOS and publishes them as a GitHub release.
+# Horizon Offline Launcher: tests on every push and pull request; a tag `launcher@1.2.3` builds the
+# launcher for Windows, Linux and macOS, signs the checksums and publishes them as a GitHub release,
+# which launchers already installed update themselves from.
 name: launcher
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['launcher@*']
   pull_request:
   workflow_dispatch:
 
@@ -14,7 +15,6 @@ permissions:
 
 env:
   HORIZON_TELEMETRY_URL: "off"
-  HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
 
 jobs:
   # The tests run once, on Linux: some of upstream's tests depend on the machine (the trash on
@@ -22,6 +22,8 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    env:
+      HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
     defaults:
       run:
         working-directory: launcher
@@ -46,16 +48,16 @@ jobs:
           - name: windows
             os: windows-latest
             binary: horizon-launcher.exe
-            asset: horizon-offline-launcher-windows-x64.exe
+            asset: horizon-launcher-windows-x64.zip
             rustflags: -C target-feature=+crt-static
           - name: linux
             os: ubuntu-22.04
             binary: horizon-launcher
-            asset: horizon-offline-launcher-linux-x86_64.tar.gz
+            asset: horizon-launcher-linux-x86_64.tar.gz
           - name: macos
             os: macos-14
             binary: horizon-launcher
-            asset: horizon-offline-launcher-macos-arm64.zip
+            asset: horizon-launcher-macos-arm64.zip
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -81,16 +83,18 @@ jobs:
           if ! xcrun metal --version > /dev/null 2>&1; then
             echo "LAUNCHER_FEATURES=gpui/runtime_shaders" >> "$GITHUB_ENV"
           fi
-      # A tag v1.2.3 is the launcher's version 1.2.3; other builds say Cargo.toml's.
+      # A tag launcher@1.2.3 is the launcher's version 1.2.3; other builds say Cargo.toml's.
       - name: Version from the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: echo "HORIZON_LAUNCHER_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        if: startsWith(github.ref, 'refs/tags/launcher@')
+        run: |
+          echo "HORIZON_LAUNCHER_VERSION=${GITHUB_REF_NAME#launcher@}" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
       - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - name: Package
         run: |
           mkdir -p ../dist
           case "${{ matrix.name }}" in
-            windows) cp target/release/${{ matrix.binary }} ../dist/${{ matrix.asset }} ;;
+            windows) 7z a -tzip ../dist/${{ matrix.asset }} ./target/release/${{ matrix.binary }} > /dev/null ;;
             linux) tar -czf ../dist/${{ matrix.asset }} -C target/release ${{ matrix.binary }} ;;
             macos) (cd target/release && zip -q ../../../dist/${{ matrix.asset }} ${{ matrix.binary }}) ;;
           esac
@@ -101,7 +105,7 @@ jobs:
 
   release:
     needs: [test, build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/launcher@')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -111,12 +115,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS
+      - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig)
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          [[ -n "$RELEASE_SIGNING_KEY" ]] || { echo "::error::The RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          bash tools/ci/sign_release.sh "$GITHUB_REF_NAME" dist/*
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The signature, checked as launchers check it
+        run: cargo run --locked --quiet -p horizon-release-sign -- verify --tag "$GITHUB_REF_NAME" dist
       - uses: softprops/action-gh-release@v2
         with:
+          name: Horizon Offline Launcher ${{ github.ref_name }}
           files: |
             dist/*
             install.ps1
             install.sh
+          make_latest: true
           generate_release_notes: true

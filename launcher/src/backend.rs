@@ -9,7 +9,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-pub const REPO: &str = "horizon-rust/horizon";
+/// Game and launcher releases come from this fork (signed with its own key, release-keys.txt),
+/// never from upstream's `horizon-rust/horizon`: those would bring the account gate back.
+pub const REPO: &str = "gerdaroot/Horizon-Offline-Launcher";
 pub const README_URL: &str =
     "https://github.com/gerdaroot/Horizon-Offline-Launcher/blob/main/launcher/README.md";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
@@ -2168,9 +2170,10 @@ pub fn exe_path() -> &'static Path {
     EXE.get_or_init(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from(LAUNCHER_BINARY)))
 }
 
-/// This build never replaces itself: an official release would bring the account gate back.
+/// Whether the launcher replaces itself with newer releases of [`REPO`].
+/// `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` keeps updates with a package manager (and out of tests).
 pub fn self_update_allowed() -> bool {
-    false
+    std::env::var_os("HORIZON_LAUNCHER_NO_SELF_UPDATE").is_none_or(|v| v.is_empty() || v == "0")
 }
 
 /// The version in `horizon-launcher --version`'s output (`horizon-launcher 0.1.5`).

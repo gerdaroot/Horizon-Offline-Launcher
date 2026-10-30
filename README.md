@@ -25,11 +25,12 @@
 
 ## What it is
 
-[Horizon](https://github.com/horizon-rust/horizon) is Minecraft: Java Edition 26.3 rewritten in Rust: its own renderer, world, mobs and redstone, compatible with vanilla worlds. The game itself comes from the official Horizon releases. This repository is a fork of its launcher where:
+[Horizon](https://github.com/horizon-rust/horizon) is Minecraft: Java Edition 26.3 rewritten in Rust: its own renderer, world, mobs and redstone, compatible with vanilla worlds. This repository is a fork of it where:
 
 - **No account is required.** Play starts the game offline under your own name. A Microsoft account is optional: add one for online-mode servers with your licensed name and skin.
 - **You can pick your own jar.** "Choose jar…" takes a `26.3.jar` from anywhere: TLauncher, your Downloads folder, a USB stick. Without a choice, the launcher finds it by itself in the folders of the official launcher, TLauncher, Prism, MultiMC, Modrinth, ATLauncher and GDLauncher.
-- **The launcher never updates itself**, so an upstream update can't bring the account requirement back.
+- **Updates come from this repository only.** The launcher and the game update themselves from its releases, signed with its own key, so an upstream update can't bring the account requirement back.
+- **Fixes in the game client**, such as joining servers whose proxy pads packet lengths (FunTime).
 - **One-command install**, with desktop and Start menu shortcuts.
 
 Everything else works as in Horizon: mods, resource packs, instances, servers, playing with friends by invite code.
@@ -77,7 +78,7 @@ Your offline name is changed with the player button at the top right.
 
 **Where are my worlds?** Where the official Horizon launcher keeps them: both use the same data folder, so worlds, instances and settings are shared.
 
-**How do I update?** Run the install command again: it puts the latest release over the old one. Worlds and settings stay.
+**How do I update?** The launcher does it by itself: it updates itself and offers new game versions from this repository's releases. Launchers 1.0.x never update themselves: run the install command once more to get one that does. Worlds and settings stay.
 
 ## Building from source
 
@@ -109,10 +110,10 @@ A tag publishes a release: `git tag v1.0.1 && git push origin v1.0.1`. GitHub Ac
 |---|---|---|
 | Microsoft account | required | optional |
 | Your own jar file | no, launcher folders only | yes, "Choose jar…" |
-| Launcher updates | automatic | with the install command |
-| The game | Horizon releases | the same Horizon releases |
+| Launcher updates | automatic, from Horizon | automatic, from this repository |
+| The game | Horizon releases | Horizon releases with this fork's client |
 
-The launcher's changes: `launcher/src/account.rs` (signing in is no longer required), `launcher/src/sources.rs` (`from_jar`), `launcher/src/main.rs` (the UI), `launcher/src/backend.rs`. The game's code (`crates/`) is unchanged.
+The launcher's changes: `launcher/src/account.rs` (signing in is no longer required), `launcher/src/sources.rs` (`from_jar`), `launcher/src/main.rs` (the UI), `launcher/src/backend.rs` (releases from this repository). In the game: `crates/horizon-protocol/src/frame.rs` (compressed packets as vanilla reads them).
 
 ## Credits and license
 
@@ -134,11 +135,12 @@ The game and nearly all of the code are [Horizon](https://github.com/horizon-rus
 
 ### Что это
 
-[Horizon](https://github.com/horizon-rust/horizon) — это Minecraft: Java Edition 26.3, заново написанный на Rust: свои рендер, мир, мобы и редстоун, совместимые с ванильными мирами. Сама игра берётся из официальных релизов Horizon. Этот репозиторий — форк его лаунчера, в котором:
+[Horizon](https://github.com/horizon-rust/horizon) — это Minecraft: Java Edition 26.3, заново написанный на Rust: свои рендер, мир, мобы и редстоун, совместимые с ванильными мирами. Этот репозиторий — его форк, в котором:
 
 - **Аккаунт не нужен.** «Играть» запускает игру офлайн под вашим ником. Аккаунт Microsoft можно добавить, если нужны онлайн-серверы с лицензионным ником и скином.
 - **Можно выбрать свой jar.** Кнопка «Выбрать jar…» берёт файл `26.3.jar` откуда угодно: из TLauncher, папки «Загрузки» или с флешки. Без выбора лаунчер сам ищет его в папках официального лаунчера, TLauncher, Prism, MultiMC, Modrinth, ATLauncher и GDLauncher.
-- **Лаунчер не обновляется сам.** Иначе официальное обновление вернуло бы обязательный вход.
+- **Обновления только из этого репозитория.** Лаунчер и игра обновляются сами из его релизов, подписанных своим ключом, поэтому официальное обновление не вернёт обязательный вход.
+- **Исправления в клиенте игры**, например вход на серверы, чей прокси дополняет длину пакетов (FunTime).
 - **Установка в одну команду.** Ярлыки на рабочем столе и в меню «Пуск» создаются сами.
 
 Всё остальное — как в Horizon: моды, ресурс-паки, сборки, серверы, игра с друзьями по коду.
@@ -184,7 +186,7 @@ curl -fsSL https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest
 
 **Где мои миры?** Там же, где у официального лаунчера Horizon: обе программы используют одну папку данных, так что миры, сборки и настройки общие.
 
-**Как обновиться?** Запустите команду установки ещё раз: она поставит последний релиз поверх старого. Миры и настройки останутся на месте.
+**Как обновиться?** Лаунчер делает это сам: обновляется и предлагает новые версии игры из релизов этого репозитория. Лаунчеры 1.0.x сами не обновляются: запустите команду установки ещё раз, чтобы получить тот, что умеет. Миры и настройки останутся на месте.
 
 ### Сборка из исходников
 
@@ -216,10 +218,10 @@ cargo build --release
 |---|---|---|
 | Аккаунт Microsoft | обязателен | по желанию |
 | Свой jar-файл | нет, только папки лаунчеров | да, кнопка «Выбрать jar…» |
-| Обновление лаунчера | само | командой установки |
-| Игра | релизы Horizon | те же релизы Horizon |
+| Обновление лаунчера | само, из Horizon | само, из этого репозитория |
+| Игра | релизы Horizon | релизы Horizon с клиентом этого форка |
 
-Изменения лаунчера: `launcher/src/account.rs` (вход больше не обязателен), `launcher/src/sources.rs` (`from_jar`), `launcher/src/main.rs` (интерфейс), `launcher/src/backend.rs`. Код игры (`crates/`) не изменён.
+Изменения лаунчера: `launcher/src/account.rs` (вход больше не обязателен), `launcher/src/sources.rs` (`from_jar`), `launcher/src/main.rs` (интерфейс), `launcher/src/backend.rs` (релизы из этого репозитория). В игре: `crates/horizon-protocol/src/frame.rs` (сжатые пакеты читаются как в ванилле).
 
 ### Благодарности и лицензия
 
