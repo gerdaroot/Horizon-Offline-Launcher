@@ -34,7 +34,6 @@ OutputBaseFilename=Horizon-Offline-Launcher-Setup
 SetupIconFile=..\icons\horizon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
-LicenseFile=..\..\LICENSE
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes

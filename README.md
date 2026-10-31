@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest"><b>Download</b></a> ·
+  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe"><b>Download for Windows</b></a> ·
   <a href="#install">Install</a> ·
   <a href="#first-run">First run</a> ·
   <a href="#faq">FAQ</a> ·
@@ -40,15 +40,29 @@ Everything else works as in Horizon: mods, resource packs, instances, servers, p
 
 ## Install
 
+<p align="center">
+  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe"><img src="https://img.shields.io/badge/Download%20for%20Windows-Setup.exe-6C4AE0?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+</p>
+
 ### Windows
 
-**[Download the installer](https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe)** (`Horizon-Offline-Launcher-Setup.exe`) and run it. It installs for your user only, without administrator rights, in `%LOCALAPPDATA%\Programs\HorizonOfflineLauncher`, with Start menu and desktop shortcuts; "Apps" in Windows settings uninstalls it (your worlds and settings stay). If Windows says "Windows protected your PC", click "More info" → "Run anyway": the file just isn't code-signed.
+1. **[Download `Horizon-Offline-Launcher-Setup.exe`](https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe)**.
+2. **Run it.** If Windows says "Windows protected your PC", click **More info → Run anyway** (the file just isn't code-signed).
+3. **Install → Finish.** The launcher opens by itself; its shortcuts are in the Start menu and, if you ticked it, on the desktop.
 
-Or in PowerShell (Win+X → Terminal), the same install in one line:
+No administrator rights needed: it installs for your user only, in `%LOCALAPPDATA%\Programs\HorizonOfflineLauncher`. To remove it: Settings → Apps → Horizon Offline Launcher → Uninstall. Your worlds and settings stay.
+
+<details>
+<summary>Without the installer: one command in PowerShell</summary>
+
+Win+X → Terminal, then:
 
 ```powershell
 irm https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/install.ps1 | iex
 ```
+
+It puts the launcher in the same place, with the same shortcuts.
+</details>
 
 ### Linux and macOS
 
@@ -136,7 +150,7 @@ The game and nearly all of the code are [Horizon](https://github.com/horizon-rus
 **Horizon Offline Launcher** — лаунчер для [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3, переписанный на Rust) без обязательного аккаунта Microsoft и с выбором своего jar.
 
 <p>
-  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest"><b>Скачать</b></a> ·
+  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe"><b>Скачать для Windows</b></a> ·
   <a href="#установка">Установка</a> ·
   <a href="#первый-запуск">Первый запуск</a> ·
   <a href="#вопросы">Вопросы</a> ·
@@ -160,13 +174,29 @@ The game and nearly all of the code are [Horizon](https://github.com/horizon-rus
 
 ### Установка
 
-**Windows.** **[Скачайте установщик](https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe)** (`Horizon-Offline-Launcher-Setup.exe`) и запустите. Он ставит лаунчер только для вашего пользователя, без прав администратора, в `%LOCALAPPDATA%\Programs\HorizonOfflineLauncher`, с ярлыками в «Пуске» и на рабочем столе. Удаляется через «Приложения» в параметрах Windows (миры и настройки остаются). Если Windows покажет «Windows защитила ваш компьютер», нажмите «Подробнее» → «Выполнить в любом случае»: файл просто не подписан сертификатом.
+<p align="center">
+  <a href="https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe"><img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%B4%D0%BB%D1%8F%20Windows-Setup.exe-6C4AE0?style=for-the-badge&logo=windows&logoColor=white" alt="Скачать для Windows"></a>
+</p>
 
-Или то же самое одной строкой в PowerShell (Win+X → «Терминал»):
+**Windows**
+
+1. **[Скачайте `Horizon-Offline-Launcher-Setup.exe`](https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/Horizon-Offline-Launcher-Setup.exe)**.
+2. **Запустите его.** Если Windows покажет «Windows защитила ваш компьютер», нажмите **«Подробнее» → «Выполнить в любом случае»** (файл просто не подписан сертификатом).
+3. **«Установить» → «Завершить».** Лаунчер откроется сам; ярлыки — в меню «Пуск» и, если отметили галочку, на рабочем столе.
+
+Права администратора не нужны: установка только для вашего пользователя, в `%LOCALAPPDATA%\Programs\HorizonOfflineLauncher`. Удалить: «Параметры» → «Приложения» → Horizon Offline Launcher → «Удалить». Миры и настройки останутся.
+
+<details>
+<summary>Без установщика: одна команда в PowerShell</summary>
+
+Win+X → «Терминал», затем:
 
 ```powershell
 irm https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest/download/install.ps1 | iex
 ```
+
+Лаунчер встанет в то же место, с теми же ярлыками.
+</details>
 
 **Linux и macOS:**
 
