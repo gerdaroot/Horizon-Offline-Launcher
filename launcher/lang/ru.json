@@ -80,7 +80,7 @@
   "Choose a cape…": "Выбрать плащ…",
   "No cape": "Без плаща",
   "Default": "По умолчанию",
-  "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the launcher and given to the game when this name plays. The game draws the default skins for now; it uses these once it can. A Microsoft account's skin and cape: coming soon.": "PNG скина 64×64 (или 64×32) и PNG плаща 64×32 хранятся в лаунчере и передаются игре, когда играет это имя. Пока игра рисует стандартные скины; она начнёт использовать эти, как только сможет. Скин и плащ аккаунта Microsoft: скоро.",
+  "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the launcher and given to the game when this name plays. You see the skin on yourself in single player and on servers that send no skin of their own; other players see it only where the server shows skins for names (SkinsRestorer: /skin). Capes aren't drawn yet.": "PNG скина 64×64 (или 64×32) и PNG плаща 64×32 хранятся в лаунчере и передаются игре, когда играет это имя. Скин виден на тебе в одиночной игре и на серверах, которые не дают свой; другие игроки видят его только там, где сервер ставит скины по имени (SkinsRestorer: /skin). Плащи пока не рисуются.",
   "Accent colour": "Цвет акцента",
   "Horizon's violet by default. Every colour keeps text as easy to read.": "По умолчанию фиолетовый Horizon. С любым цветом текст читается так же легко.",
   "Choose": "Выбрать",

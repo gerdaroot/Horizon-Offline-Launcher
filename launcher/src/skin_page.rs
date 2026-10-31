@@ -234,9 +234,10 @@ impl Launcher {
                         }))
                         .child(text(theme::CAPTION).text_color(t.muted).child(tr(
                             "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the \
-                             launcher and given to the game when this name plays. The game \
-                             draws the default skins for now; it uses these once it can. A \
-                             Microsoft account's skin and cape: coming soon.",
+                             launcher and given to the game when this name plays. You see the \
+                             skin on yourself in single player and on servers that send no skin \
+                             of their own; other players see it only where the server shows \
+                             skins for names (SkinsRestorer: /skin). Capes aren't drawn yet.",
                         ))),
                 ),
         )

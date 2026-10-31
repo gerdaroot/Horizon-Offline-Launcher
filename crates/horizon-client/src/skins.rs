@@ -627,6 +627,8 @@ pub struct Downloader {
     /// atlas uploads again (`again`); the disk cache backs anything dropped.
     images: std::collections::HashMap<String, Vec<u8>>,
     image_order: std::collections::VecDeque<String>,
+    /// `offline_skin`'s answer, read once.
+    offline: Option<Option<Textures>>,
 }
 /// `images` is bounded only so a long session on a busy server does not grow
 /// without end; the disk cache holds everything it drops.
@@ -643,7 +645,35 @@ impl Downloader {
             queued: Default::default(),
             images: Default::default(),
             image_order: Default::default(),
+            offline: None,
         }
+    }
+    /// The skin the launcher gives an offline name (`HORIZON_OFFLINE_SKIN`, its model in
+    /// `HORIZON_OFFLINE_SKIN_MODEL`), as the textures a signed-in account's profile would
+    /// name: the PNG goes into the texture cache under its SHA-1, so `state` finds it there
+    /// and never asks the network. `None` without one, or when it can't be read.
+    pub fn offline_skin(&mut self) -> Option<Textures> {
+        if self.offline.is_none() {
+            self.offline = Some(self.read_offline_skin());
+        }
+        self.offline.clone().flatten()
+    }
+    fn read_offline_skin(&self) -> Option<Textures> {
+        let path = std::env::var_os("HORIZON_OFFLINE_SKIN").filter(|p| !p.is_empty())?;
+        let slim = std::env::var("HORIZON_OFFLINE_SKIN_MODEL").is_ok_and(|m| m == "slim");
+        self.cache_local_skin(&std::fs::read(path).ok()?, slim)
+    }
+    fn cache_local_skin(&self, bytes: &[u8], slim: bool) -> Option<Textures> {
+        let hash: String = sha1(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let digest = skin_location(&hash)["skins/".len()..].to_owned();
+        let file = self.root.join(&digest[..2]).join(&digest);
+        std::fs::create_dir_all(file.parent()?).ok()?;
+        std::fs::write(&file, bytes).ok()?;
+        Some(Textures {
+            skin: Some(format!("https://textures.minecraft.net/texture/{hash}")),
+            slim,
+            ..Textures::default()
+        })
     }
     /// How the download of `url` stands, starting it the first time.
     pub fn state(&mut self, kind: Kind, url: &str) -> Download {
@@ -959,6 +989,33 @@ mod tests {
         d.queue("skins/def".into(), vec![4]);
         assert!(d.again("skins/def"));
         assert_eq!(d.take_ready(), vec![("skins/def".to_owned(), vec![4])]);
+    }
+
+    /// The launcher's offline skin loads from the texture cache, never the network.
+    #[test]
+    fn offline_skins_come_from_the_cache() {
+        let root = std::env::temp_dir().join(format!("horizon-test-offline-{}", std::process::id()));
+        let mut d = super::Downloader::new(root.clone());
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 64, 64);
+        encoder.set_color(png::ColorType::Rgba);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[9, 8, 7, 255].repeat(64 * 64)).unwrap();
+        writer.finish().unwrap();
+        let textures = d.cache_local_skin(&png, true).unwrap();
+        assert!(textures.slim && !textures.signed);
+        let url = textures.skin.clone().unwrap();
+        let start = std::time::Instant::now();
+        while d.state(super::Kind::Skin, &url) == super::Download::Pending {
+            assert!(start.elapsed().as_secs() < 10);
+            std::thread::yield_now();
+        }
+        let location = super::lookup(&textures, false, |k, u| d.state(k, u)).unwrap();
+        let ready = d.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, location);
+        assert_eq!(&ready[0].1[..4], &[9, 8, 7, 255]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

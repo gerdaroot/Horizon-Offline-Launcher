@@ -80,7 +80,7 @@
   "Choose a cape…": "Choisir une cape…",
   "No cape": "Pas de cape",
   "Default": "Par défaut",
-  "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the launcher and given to the game when this name plays. The game draws the default skins for now; it uses these once it can. A Microsoft account's skin and cape: coming soon.": "Un PNG de skin 64×64 (ou 64×32) et un PNG de cape 64×32, gardés par le launcher et donnés au jeu quand ce nom joue. Le jeu dessine encore les skins par défaut ; il utilisera ceux-ci dès qu'il le pourra. Skin et cape d'un compte Microsoft : bientôt.",
+  "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the launcher and given to the game when this name plays. You see the skin on yourself in single player and on servers that send no skin of their own; other players see it only where the server shows skins for names (SkinsRestorer: /skin). Capes aren't drawn yet.": "Un PNG de skin 64×64 (ou 64×32) et un PNG de cape 64×32, gardés par le launcher et donnés au jeu quand ce nom joue. Tu vois le skin sur toi en solo et sur les serveurs qui n'en envoient pas ; les autres joueurs ne le voient que là où le serveur met des skins par nom (SkinsRestorer : /skin). Les capes ne sont pas encore dessinées.",
   "Accent colour": "Couleur d'accent",
   "Horizon's violet by default. Every colour keeps text as easy to read.": "Le violet d'Horizon par défaut. Chaque couleur garde le texte aussi lisible.",
   "Choose": "Choisir",

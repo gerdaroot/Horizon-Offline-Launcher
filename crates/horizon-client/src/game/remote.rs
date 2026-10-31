@@ -3086,10 +3086,13 @@ impl Game<'_> {
             .collect();
         Some((players, r.online_mode, upside_down))
     }
-    /// The signed-in account's `textures`, once the services answered.
+    /// The signed-in account's `textures`, once the services answered; offline, the skin
+    /// the launcher picked for the name.
     fn own_textures(&self) -> Option<horizon_client::skins::Textures> {
         use horizon_client::skins::{self, NameOrId, Resolve};
-        let auth = horizon_client::auth::current()?;
+        let Some(auth) = horizon_client::auth::current() else {
+            return self.skin_downloads.borrow_mut().offline_skin();
+        };
         let state = self
             .skin_profiles
             .borrow_mut()
