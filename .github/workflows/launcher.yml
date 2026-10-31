@@ -1,6 +1,6 @@
 # Horizon Offline Launcher: tests on every push and pull request; a tag `launcher@1.2.3` builds the
-# launcher for Windows, Linux and macOS, signs the checksums and publishes them as a GitHub release,
-# which launchers already installed update themselves from.
+# launcher for Windows (with its installer), Linux and macOS, signs the checksums and publishes them
+# as a GitHub release, which launchers already installed update themselves from.
 name: launcher
 
 on:
@@ -98,10 +98,30 @@ jobs:
             linux) tar -czf ../dist/${{ matrix.asset }} -C target/release ${{ matrix.binary }} ;;
             macos) (cd target/release && zip -q ../../../dist/${{ matrix.asset }} ${{ matrix.binary }}) ;;
           esac
+      # The installer most people download (packaging/windows/setup.iss); the zip stays what
+      # launchers update themselves from.
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          $version = if ($env:HORIZON_LAUNCHER_VERSION) { $env:HORIZON_LAUNCHER_VERSION } else { "0.0.0" }
+          & $iscc /Q "/DAppVersion=$version" "/DSource=$PWD\target\release\horizon-launcher.exe" "/O$PWD\..\dist" ..\packaging\windows\setup.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem ..\dist
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: Horizon-Offline-Launcher-Setup.exe
+          path: dist/Horizon-Offline-Launcher-Setup.exe
 
   release:
     needs: [test, build]

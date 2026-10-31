@@ -3,6 +3,9 @@
 # exporters, horizon-prepare and the rest come from there, built from Mojang's jars on upstream's
 # private runner), then signs the checksums and publishes them. The launcher's own release stays
 # GitHub's "latest", where install.ps1 and install.sh download from.
+#
+# A fourth number is this fork's own revision of a Horizon version: `v0.2.97.1` is Horizon 0.2.97's
+# files with a newer client, and the game still calls itself 0.2.97.
 name: game
 
 on:
@@ -14,7 +17,7 @@ on:
         description: The release to make (v0.2.97); the tag must exist
         required: true
       upstream:
-        description: Horizon's release whose files the client goes into (empty for the same tag)
+        description: Horizon's release whose files the client goes into (empty for the tag without its fourth number)
         required: false
 
 permissions:
@@ -22,7 +25,7 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
-  UPSTREAM: ${{ inputs.upstream || inputs.tag || github.ref_name }}
+  UPSTREAM: ${{ inputs.upstream }}
   HORIZON_TELEMETRY_URL: "off"
 
 jobs:
@@ -60,6 +63,8 @@ jobs:
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
+      - name: Horizon's version this release is built on
+        run: echo "UPSTREAM=${UPSTREAM:-$(sed -E 's/^(v[0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$/\1/' <<< "$TAG")}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -70,7 +75,7 @@ jobs:
       - name: Build the client
         # `horizon-client/mods`: every released game runs code mods (the feature is off in dev builds).
         run: |
-          export HORIZON_VERSION="${TAG#v}"
+          export HORIZON_VERSION="${UPSTREAM#v}"
           cargo build --release --locked --features horizon-client/mods -p horizon-client --bin horizon-client
       - name: Horizon's release of the same version
         run: |
@@ -117,6 +122,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+      - name: Horizon's version this release is built on
+        run: echo "UPSTREAM=${UPSTREAM:-$(sed -E 's/^(v[0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$/\1/' <<< "$TAG")}" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           path: dist

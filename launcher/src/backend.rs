@@ -156,12 +156,14 @@ fn own_tag_of(tag: Option<&str>, injected: Option<&str>) -> String {
 /// before 0.2 (`vYYYY.MM.DD[.N]`, `launcher-vX.Y.Z`) and bare versions first, compared number by
 /// number with missing parts as zero and anything after a `-` ignored, as launchers always did;
 /// then the 0.2 tags (`vX.Y.Z`, `launcher@X.Y.Z`) in semver's order, a pre-release
-/// (`v0.3.0-rc.1`) before its release.
+/// (`v0.3.0-rc.1`) before its release. This fork's game releases may add a fourth number, its
+/// own revision of Horizon's version: `v0.2.97.1` follows `v0.2.97` and comes before `v0.2.98`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReleaseOrder {
     /// Numbers without trailing zeros, so 1.2 and 1.2.0 are equal.
     Before02(Vec<u64>),
-    Semver([u64; 3], Prerelease),
+    /// Major, minor, patch and the fork's revision (0 when the tag has none).
+    Semver([u64; 4], Prerelease),
 }
 
 /// (is a release, the pre-release's identifiers): a release follows every pre-release of its
@@ -202,7 +204,7 @@ pub fn release_order(tag: &str) -> ReleaseOrder {
     })
 }
 
-/// `MAJOR.MINOR.PATCH[-PRE]` with a major below [`FIRST_YEAR`], or None.
+/// `MAJOR.MINOR.PATCH[.REVISION][-PRE]` with a major below [`FIRST_YEAR`], or None.
 fn semver_order(version: &str) -> Option<ReleaseOrder> {
     let (core, pre) = match version.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
@@ -212,8 +214,10 @@ fn semver_order(version: &str) -> Option<ReleaseOrder> {
         .split('.')
         .map(|n| n.parse().ok())
         .collect::<Option<_>>()?;
-    let &[major, minor, patch] = numbers.as_slice() else {
-        return None;
+    let (major, minor, patch, revision) = match *numbers.as_slice() {
+        [major, minor, patch] => (major, minor, patch, 0),
+        [major, minor, patch, revision] => (major, minor, patch, revision),
+        _ => return None,
     };
     if major >= FIRST_YEAR {
         return None;
@@ -232,7 +236,7 @@ fn semver_order(version: &str) -> Option<ReleaseOrder> {
                 .collect::<Option<_>>()?,
         ),
     };
-    Some(ReleaseOrder::Semver([major, minor, patch], pre))
+    Some(ReleaseOrder::Semver([major, minor, patch, revision], pre))
 }
 
 /// Compares two tags or versions by [`release_order`].
@@ -3264,6 +3268,11 @@ mod tests {
         assert_eq!(compare_versions("v0.3.0-beta.1", "v0.3.0-beta"), Greater);
         assert_eq!(compare_versions("v0.3.0-alpha", "v0.3.0-1"), Greater);
         assert_eq!(compare_versions("v0.2.1-beta.1", "v2026.10.21"), Greater);
+        // This fork's revisions of a Horizon version.
+        assert_eq!(compare_versions("v0.2.97.1", "v0.2.97"), Greater);
+        assert_eq!(compare_versions("v0.2.97.2", "v0.2.97.1"), Greater);
+        assert_eq!(compare_versions("v0.2.98", "v0.2.97.9"), Greater);
+        assert_eq!(compare_versions("v0.2.97.0", "v0.2.97"), Equal);
         // Launcher and game tags of 0.2 compare alike; old launcher tags stay below.
         assert_eq!(
             compare_versions("launcher@0.2.0", "launcher-v0.16.0"),

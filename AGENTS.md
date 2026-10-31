@@ -15,10 +15,15 @@ This is **Horizon Offline Launcher** (`gerdaroot/Horizon-Offline-Launcher`), a f
   its own key (`crates/horizon-release-sign/release-keys.txt`; the private key is the repository's
   `RELEASE_SIGNING_KEY` secret). The launcher updates itself unless `HORIZON_LAUNCHER_NO_SELF_UPDATE=1`.
 - Releases: a `launcher@X.Y.Z` tag runs `.github/workflows/launcher.yml` (the launcher, GitHub's
-  "latest" release, with install.ps1 and install.sh); a `vX.Y.Z` tag runs `.github/workflows/game.yml`,
-  which builds this fork's horizon-client and puts it into upstream's release of the same version
-  (exporters and the rest come from there). Tag the game with the upstream version it is merged up to.
-- Install: `install.ps1`, `install.sh`, `build.ps1` at the root.
+  "latest" release, with the Windows installer `Horizon-Offline-Launcher-Setup.exe` from
+  `packaging/windows/setup.iss`, install.ps1 and install.sh); a `vX.Y.Z[.R]` tag runs
+  `.github/workflows/game.yml`, which builds this fork's horizon-client and puts it into upstream's
+  release `vX.Y.Z` (exporters and the rest come from there). Tag the game with the upstream version it
+  is merged up to; the fourth number `R` is the fork's own revision of it (`v0.2.97.1` follows
+  `v0.2.97`, `backend::release_order`), and the game still reports the upstream version.
+- Offline skins: the launcher passes `HORIZON_OFFLINE_SKIN`/`_MODEL` (`launcher/src/skins.rs`); the
+  client shows it on the local player when no account plays (`Downloader::offline_skin`).
+- Install: `Horizon-Offline-Launcher-Setup.exe`, `install.ps1`, `install.sh`, `build.ps1` at the root.
 
 Upstream's process rules below (Ludovic's attribution lines, PR labels, release batches, the parity
 harnesses) are about upstream's repository; in this fork, commits and PRs carry no agent
