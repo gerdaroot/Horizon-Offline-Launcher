@@ -1643,7 +1643,11 @@ fn launch_as(
     );
     let pass = accounts
         .play_as(store, who.clone())
-        .and_then(|()| launch(ep, client_id, store, accounts).map_err(|e| e.to_string()));
+        .and_then(|()| match launch(ep, client_id, store, accounts) {
+            // This fork: no owner plays offline, as `launch_for_game` lets it.
+            Err(NoOwner) if GATE_OPEN => Ok(Launch::default()),
+            pass => pass.map_err(|e| e.to_string()),
+        });
     (
         accounts.selected,
         accounts.offline_selected,

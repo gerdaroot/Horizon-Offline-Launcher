@@ -41,11 +41,23 @@ jobs:
           set -euo pipefail
           name=$(gh api "repos/horizon-rust/horizon/releases/tags/$UPSTREAM" --jq .name)
           echo "Horizon's $UPSTREAM: $name"
+          # Every platform takes the files of this one Nightly, even if Horizon publishes the next
+          # while the clients build.
+          mkdir upstream
+          for asset in horizon-linux-x86_64.tar.gz horizon-windows-x64.zip horizon-macos-arm64.zip                        horizon-macos-x64.zip horizon-server-linux-x86_64.tar.gz; do
+            gh release download "$UPSTREAM" -R horizon-rust/horizon -D upstream -p "$asset"
+          done
+          [[ "$(gh api "repos/horizon-rust/horizon/releases/tags/$UPSTREAM" --jq .name)" == "$name" ]]             || { echo "::error::Horizon's $UPSTREAM changed while downloading; run again"; exit 1; }
           {
             echo "date=$(date -u +%F)"
             echo "short=${GITHUB_SHA:0:7}"
             echo "upstream_name=$name"
           } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream
+          path: upstream/*
+          retention-days: 3
 
   build:
     name: build ${{ matrix.name }}
@@ -105,15 +117,18 @@ jobs:
           cargo build --release --locked -p horizon-client --bin horizon-client "${target[@]}"
           out=target/release; [[ -n "${{ matrix.target }}" ]] && out="target/${{ matrix.target }}/release"
           echo "CLIENT=$out/${{ matrix.client }}" >> "$GITHUB_ENV"
-      - name: Horizon's files of the same Nightly
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: upstream
+          path: horizon-files
+      - name: Horizon's files of that Nightly
         run: |
           mkdir -p upstream dist
-          gh release download "$UPSTREAM" -R horizon-rust/horizon -D upstream -p "${{ matrix.asset }}"
+          mv "horizon-files/${{ matrix.asset }}" upstream/
           if [[ -n "${{ matrix.server_asset }}" ]]; then
-            gh release download "$UPSTREAM" -R horizon-rust/horizon -D dist -p "${{ matrix.server_asset }}"
+            mv "horizon-files/${{ matrix.server_asset }}" dist/
           fi
+          rm -rf horizon-files
       - name: Put this fork's client in them
         run: |
           set -euo pipefail
@@ -154,6 +169,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: game-*
           merge-multiple: true
       - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig) for the nightly channel
         env:

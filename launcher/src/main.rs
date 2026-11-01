@@ -911,8 +911,10 @@ impl Launcher {
                                 continue;
                             }
                         };
-                        // Past the gate by the developer option alone is no owner.
-                        if !self.settings.dev_offline {
+                        // Past the gate by the developer option alone is no owner, and in this
+                        // fork (`account::GATE_OPEN`) only a session means one: no owner plays
+                        // offline too.
+                        if !(self.settings.dev_offline || account::GATE_OPEN) || file.is_some() {
                             self.owner = Some(true);
                         }
                         if let Some(file) = file {
@@ -2049,6 +2051,8 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
         _ if busy => PlayPress::Nothing,
         (true, _) => PlayPress::Play,
         (false, Some(true)) => PlayPress::PrepareThenPlay,
+        // This fork: no owner prepares from the player's own Minecraft install, then plays.
+        (false, _) if account::GATE_OPEN => PlayPress::PrepareThenPlay,
         (false, _) => PlayPress::Nothing,
     }
 }
@@ -4955,8 +4959,10 @@ mod tests {
             play_press(false, Some(true), false),
             PlayPress::PrepareThenPlay
         );
-        assert_eq!(play_press(false, Some(false), false), PlayPress::Nothing);
-        assert_eq!(play_press(false, None, false), PlayPress::Nothing);
+        // This fork (`account::GATE_OPEN`): no owner prepares from the player's own install.
+        assert_eq!(play_press(false, Some(false), false), PlayPress::PrepareThenPlay);
+        assert_eq!(play_press(false, None, false), PlayPress::PrepareThenPlay);
+        assert!(!super::starts_now(false, false, false));
         assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
         assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);
     }
