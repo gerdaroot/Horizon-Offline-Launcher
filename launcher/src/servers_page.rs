@@ -1,6 +1,7 @@
 //! The Servers page: create a server in one dialog, then start, stop and watch it, give friends its
 //! address, manage who may join, change its settings, back it up and update it, all with buttons. Every
 //! action runs `horizon-server` or calls the running server's control API (`horizon_launcher::servers`).
+use super::line_edit::{self, Key, LineEdit};
 use super::*;
 use horizon_launcher::heads;
 use horizon_launcher::servers::{
@@ -35,6 +36,10 @@ pub(super) enum Field {
     /// The instance dialog's (`instances_page.rs`).
     InstanceName,
     InstanceGroup,
+    /// Its search in Mojang's versions (`new_instance.rs`).
+    InstanceVersion,
+    /// Home's Mods tab's filter (`instance_mods.rs`).
+    InstanceModsFilter,
     /// Home's Multiplayer section's (`multiplayer_page.rs`).
     ServerName,
     ServerAddress,
@@ -44,13 +49,14 @@ pub(super) enum Field {
     PreLaunch,
     Wrapper,
     LaunchEnv,
+    PostExit,
     /// Settings' new offline name (`switch_page.rs`).
     OfflineName,
     DeleteServer,
 }
 
 impl Field {
-    const ALL: [Field; 19] = [
+    const ALL: [Field; 22] = [
         Field::Name,
         Field::Seed,
         Field::Players,
@@ -62,12 +68,15 @@ impl Field {
         Field::Email,
         Field::InstanceName,
         Field::InstanceGroup,
+        Field::InstanceVersion,
+        Field::InstanceModsFilter,
         Field::ServerName,
         Field::ServerAddress,
         Field::ConsoleSearch,
         Field::PreLaunch,
         Field::Wrapper,
         Field::LaunchEnv,
+        Field::PostExit,
         Field::OfflineName,
         Field::DeleteServer,
     ];
@@ -189,7 +198,7 @@ pub(super) struct Servers {
     /// `update --check` is under way.
     checking: bool,
     pvp: Option<bool>,
-    texts: HashMap<Field, String>,
+    texts: HashMap<Field, LineEdit>,
     focus: HashMap<Field, FocusHandle>,
     focused: Option<Field>,
     /// The field to put the keyboard in on the next frame.
@@ -250,18 +259,18 @@ impl Servers {
         }
     }
 
-    pub(super) fn text(&mut self, f: Field) -> &mut String {
+    pub(super) fn text(&mut self, f: Field) -> &mut LineEdit {
         self.texts.entry(f).or_default()
     }
 
     pub(super) fn value(&self, f: Field) -> &str {
-        self.texts.get(&f).map_or("", String::as_str)
+        self.texts.get(&f).map_or("", LineEdit::text)
     }
 
     /// Which field has the keyboard, read every frame.
-    pub(super) fn note_focus(&mut self, window: &mut Window) {
+    pub(super) fn note_focus(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(h) = self.focus_soon.take().and_then(|f| self.focus.get(&f)) {
-            window.focus(h);
+            window.focus(h, cx);
         }
         self.focused = Field::ALL
             .into_iter()
@@ -330,65 +339,6 @@ fn bytes(n: u64) -> String {
 }
 
 /// A backup's date and kind from its name (`2026-10-19_11-28-57-manual.zip`, UTC), for people.
-/// What a key did in a one-line field.
-#[derive(Debug, PartialEq)]
-pub(super) enum Key {
-    Enter,
-    Escape,
-    /// Command/Ctrl-V: the caller pastes the clipboard's first line.
-    Paste,
-    Edited,
-    /// Not the field's: Tab (focus), arrows, shortcuts.
-    Pass,
-}
-
-/// Types `key` into `text`. A `selected` suggestion is replaced by what's typed or pasted, and
-/// cleared by Backspace.
-pub(super) fn type_key(
-    text: &mut String,
-    selected: bool,
-    key: &str,
-    key_char: Option<&str>,
-    command: bool,
-) -> Key {
-    let replace = |text: &mut String| {
-        if selected {
-            text.clear();
-        }
-    };
-    match key {
-        "enter" => Key::Enter,
-        "escape" => Key::Escape,
-        "v" if command => {
-            replace(text);
-            Key::Paste
-        }
-        "backspace" => {
-            if selected {
-                text.clear();
-            } else {
-                text.pop();
-            }
-            Key::Edited
-        }
-        _ if command => Key::Pass,
-        // Not every platform gives Space a character.
-        "space" => {
-            replace(text);
-            text.push(' ');
-            Key::Edited
-        }
-        _ => match key_char {
-            Some(ch) if !ch.is_empty() && !ch.chars().any(char::is_control) => {
-                replace(text);
-                text.push_str(ch);
-                Key::Edited
-            }
-            _ => Key::Pass,
-        },
-    }
-}
-
 fn backup_label(b: &Backup) -> (String, String) {
     let stem = b.name.trim_end_matches(".zip");
     let (when, kind) = match stem.get(..19) {
@@ -419,13 +369,6 @@ fn uptime(secs: u64) -> String {
         60..3600 => format!("{} min", secs / 60),
         3600..86_400 => format!("{} h {:02} min", secs / 3600, secs / 60 % 60),
         _ => format!("{} d {} h", secs / 86_400, secs / 3600 % 24),
-    }
-}
-
-/// Keeps a field's text to 256 characters.
-fn clip(text: &mut String) {
-    if let Some((at, _)) = text.char_indices().nth(256) {
-        text.truncate(at);
     }
 }
 
@@ -844,10 +787,12 @@ impl Launcher {
         } else {
             format!("Server {}", self.servers.list.len() + 1)
         };
-        *self.servers.text(Field::Name) = name;
+        self.servers.text(Field::Name).set(name);
         self.servers.selected = Some(Field::Name);
-        self.servers.text(Field::Seed).clear();
-        *self.servers.text(Field::Players) = own_name(&self.accounts).unwrap_or_default();
+        self.servers.text(Field::Seed).set(String::new());
+        self.servers
+            .text(Field::Players)
+            .set(own_name(&self.accounts).unwrap_or_default());
         self.servers.problem = None;
         self.servers.create_scroll = Scrollbar::default();
         self.servers.create = Some(Create {
@@ -858,7 +803,7 @@ impl Launcher {
             difficulty: "normal",
             max_players: 10,
             friends_only: true,
-            check_accounts: false,
+            check_accounts: true,
             eula: false,
             eula_missing: false,
         });
@@ -944,16 +889,8 @@ impl Launcher {
         let focused = self.servers.focused == Some(f);
         let selected = focused && self.servers.selected == Some(f);
         let invalid = self.servers.invalid.is_some_and(|(g, _)| g == f);
-        let value = self.servers.value(f).to_string();
-        let shown: String = {
-            let chars: Vec<char> = value.chars().collect();
-            if f == Field::Token {
-                "•".repeat(chars.len().min(40))
-            } else {
-                chars[chars.len().saturating_sub(60)..].iter().collect()
-            }
-        };
-        div()
+        self.servers.text(f).show(((width - 24.) / 7.5) as usize);
+        let field = div()
             .id(SharedString::from(format!("field-{f:?}")))
             .track_focus(&handle)
             .flex()
@@ -974,44 +911,35 @@ impl Launcher {
             .bg(t.surface)
             .text_size(px(theme::UI.px))
             .cursor_text()
-            .child(if value.is_empty() && !focused {
-                div().text_color(t.muted).child(placeholder)
-            } else {
-                div()
-                    .text_color(t.ink)
-                    .when(selected, |d| {
-                        d.rounded(px(2.)).bg(t.accent.opacity(theme::SELECTION))
-                    })
-                    .child(shown)
-            })
-            .when(focused, |d| {
-                d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.ink))
-            })
+            .child(line_edit::content(
+                self.servers.text(f),
+                &t,
+                focused,
+                selected,
+                f == Field::Token,
+                placeholder,
+            ))
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 // A click puts the caret in: the suggestion is no longer selected.
                 if matches!(ev, ClickEvent::Mouse(_)) {
                     this.servers.selected = None;
                 }
                 if let Some(h) = this.servers.focus.get(&f) {
-                    window.focus(h);
+                    window.focus(h, cx);
                 }
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
-                let k = &ev.keystroke;
-                let command = k.modifiers.control || k.modifiers.platform;
-                if k.key != "enter" && this.servers.invalid.is_some_and(|(g, _)| g == f) {
+                if ev.keystroke.key != "enter" && this.servers.invalid.is_some_and(|(g, _)| g == f)
+                {
                     this.servers.invalid = None;
                 }
+                // A suggestion is selected: what's typed or pasted replaces it.
                 let selected = this.servers.selected.take() == Some(f);
-                let typed = type_key(
-                    this.servers.text(f),
-                    selected,
-                    &k.key,
-                    k.key_char.as_deref(),
-                    command,
-                );
-                match typed {
+                if selected {
+                    this.servers.text(f).select_all();
+                }
+                match line_edit::handle(this.servers.text(f), ev, cx) {
                     Key::Enter if matches!(f, Field::InstanceName | Field::InstanceGroup) => {
                         this.save_instance(cx)
                     }
@@ -1022,22 +950,16 @@ impl Launcher {
                             this.servers.create = None;
                         }
                         this.instance_escape();
-                        window.blur();
+                        window.blur(cx);
                     }
-                    Key::Paste => {
-                        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                            let line = text.lines().next().unwrap_or_default().trim().to_string();
-                            this.servers.text(f).push_str(&line);
-                        }
-                    }
-                    Key::Edited => {}
                     // Tab and the rest go on to the window: Tab moves the focus.
                     Key::Pass => return,
+                    _ => {}
                 }
-                clip(this.servers.text(f));
                 cx.stop_propagation();
                 cx.notify();
-            }))
+            }));
+        line_edit::mouse(field, cx, move |this| this.servers.text(f))
     }
 
     /// Escape closes the Create dialog. Whether it did.
@@ -1058,7 +980,7 @@ impl Launcher {
         match f {
             Field::Name | Field::Seed | Field::Players => self.create_server(),
             Field::Command => {
-                let line = std::mem::take(self.servers.text(Field::Command));
+                let line = self.servers.text(Field::Command).take();
                 let line = line.trim().trim_start_matches('/').to_string();
                 if !line.is_empty() {
                     self.api_command(line);
@@ -1079,9 +1001,13 @@ impl Launcher {
             Field::Email => self.invite_friend(),
             Field::InstanceName
             | Field::InstanceGroup
+            | Field::InstanceVersion
+            | Field::InstanceModsFilter
             | Field::ConsoleSearch
             | Field::DeleteServer => {}
-            Field::PreLaunch | Field::Wrapper | Field::LaunchEnv => self.save_launch(),
+            Field::PreLaunch | Field::Wrapper | Field::LaunchEnv | Field::PostExit => {
+                self.save_launch()
+            }
             Field::OfflineName => self.offline_name_enter(),
             Field::ServerName | Field::ServerAddress => self.add_server(),
         }
@@ -1110,7 +1036,7 @@ impl Launcher {
             ));
             return;
         }
-        self.servers.text(Field::AddPlayer).clear();
+        self.servers.text(Field::AddPlayer).set(String::new());
         self.server_command(
             &format!("Letting {name} in"),
             vec!["whitelist".into(), "add".into(), name],
@@ -1118,7 +1044,7 @@ impl Launcher {
     }
 
     /// A player's face, from the default skin their UUID picks (the server knows no other).
-    fn head(&mut self, uuid: &str, size: f32) -> Div {
+    pub(super) fn head(&mut self, uuid: &str, size: f32) -> Div {
         let resources = servers::game_files(&servers::runtime_root(), "26.3");
         let face = self
             .servers
@@ -1234,15 +1160,34 @@ impl Launcher {
         {
             page = page.child(self.problem_notice(p, cx));
         }
-        let partner = super::partner::banner("partner-servers", 600., &t);
+        // The banner, with a "Hide" once it has been on screen a while: hiding it hides the
+        // sidebar's card too, for good. Nothing at all once hidden.
+        let partner = (!self.settings.partner_hidden).then(|| {
+            let mut slot = div().relative().w(px(600.)).child(super::partner::banner(
+                "partner-servers",
+                600.,
+                &t,
+            ));
+            if self.settings.partner_seen_secs >= super::partner::SEEN_BEFORE_HIDE {
+                slot = slot.child(
+                    super::partner::hide_button("partner-servers-hide", &t).on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            this.settings.partner_hidden = true;
+                            this.settings.save();
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+            slot
+        });
         if self.servers.list.is_empty() {
             return page
                 .child(centered(
-                    "No server yet. Create one: it takes a few seconds, and with the defaults \
-                     (tick the EULA, press Create) you get a friends-only survival world.",
+                    tr("No server yet. Create one: it takes a few seconds, and with the defaults (tick the EULA, press Create) you get a friends-only survival world."),
                     &t,
                 ))
-                .child(partner);
+                .children(partner);
         }
         let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
         for (i, e) in self.servers.list.clone().into_iter().enumerate() {
@@ -1254,10 +1199,15 @@ impl Launcher {
                 .unwrap_or_else(Status::stopped);
             let detail = if status.running() {
                 format!(
-                    "{} · {} of {} players",
+                    "{} · {}",
                     phase_label(&status),
-                    status.players.len(),
-                    status.max_players.unwrap_or(0)
+                    trf(
+                        "{online} of {max} players",
+                        &[
+                            ("online", &status.players.len().to_string()),
+                            ("max", &status.max_players.unwrap_or(0).to_string()),
+                        ]
+                    )
                 )
             } else {
                 format!("{} · {}", phase_label(&status), short(&e.dir))
@@ -1283,7 +1233,7 @@ impl Launcher {
                 &t,
             ));
         }
-        page.child(list).child(partner)
+        page.child(list).children(partner)
     }
 
     fn add_server_folder(&mut self, cx: &mut Context<Self>) {
@@ -1380,7 +1330,7 @@ impl Launcher {
         if self.servers.list.len() > 1 || self.servers.create.is_none() {
             top = top.child(
                 div().flex().child(
-                    caps("← All servers")
+                    caps(tr("← All servers"))
                         .id("servers-back")
                         .text_color(t.muted)
                         .cursor_pointer()
@@ -1539,11 +1489,11 @@ impl Launcher {
             );
         }
         if running && !self.servers.restart_needed.is_empty() {
-            let names: Vec<&str> = self
+            let names: Vec<String> = self
                 .servers
                 .restart_needed
                 .iter()
-                .map(|k| setting_name(k))
+                .map(|k| tr(setting_name(k)).to_string())
                 .collect();
             page = page.child(
                 plate(&t)
@@ -1557,7 +1507,10 @@ impl Launcher {
                             .flex_1()
                             .text_size(px(theme::UI.px))
                             .text_color(t.ink)
-                            .child(format!("Saved. Restart to apply: {}.", names.join(", "))),
+                            .child(trf(
+                                "Saved. Restart to apply: {settings}.",
+                                &[("settings", &names.join(", "))],
+                            )),
                     )
                     .child({
                         let b =
@@ -1608,7 +1561,7 @@ impl Launcher {
                 .gap(px(4.))
                 .p(px(16.))
                 .child(text(theme::TITLE).text_color(t.ink).child(value))
-                .child(caps(label).text_color(t.muted))
+                .child(caps(tr(label)).text_color(t.muted))
         };
         let dash = || "–".to_string();
         let on = status.running();
@@ -1673,7 +1626,7 @@ impl Launcher {
             .flex_col()
             .gap(px(10.))
             .p(px(20.))
-            .child(caps("Address on this network").text_color(t.muted))
+            .child(caps(tr("Address on this network")).text_color(t.muted))
             .child(
                 div()
                     .flex()
@@ -1702,13 +1655,12 @@ impl Launcher {
                         })),
                     ),
             )
-            .child(text(theme::CAPTION).text_color(t.ink_soft).child(
+            .child(text(theme::CAPTION).text_color(t.ink_soft).child(tr(
                 "Friends on the same Wi-Fi: Multiplayer, Add Server, then paste this address.",
-            ))
-            .child(text(theme::CAPTION).text_color(t.muted).child(format!(
-                "Friends elsewhere can't reach it as it is: use Tailscale (free, nothing to change \
-                 on your router, only people you invite), or forward TCP port {port} on your router \
-                 to this computer."
+            )))
+            .child(text(theme::CAPTION).text_color(t.muted).child(trf(
+                "Friends elsewhere can't reach it as it is: use Tailscale (free, nothing to change on your router, only people you invite), or forward TCP port {port} on your router to this computer.",
+                &[("port", &port.to_string())],
             )));
         let mut tab = div().flex().flex_col().gap(px(20.)).child(address_plate);
         if !status.players.is_empty() {
@@ -1728,7 +1680,7 @@ impl Launcher {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(caps("Online now").text_color(t.muted))
+                    .child(caps(tr("Online now")).text_color(t.muted))
                     .child(row),
             );
         }
@@ -1761,9 +1713,9 @@ impl Launcher {
             .text_color(t.ink_soft)
             .when(empty, |d| {
                 d.child(div().text_color(t.muted).child(if running {
-                    "Waiting for the server's log…"
+                    tr("Waiting for the server's log…")
                 } else {
-                    "The server's log shows here while it runs."
+                    tr("The server's log shows here while it runs.")
                 }))
             })
             .children(lines);
@@ -1789,7 +1741,7 @@ impl Launcher {
                 .items_center()
                 .text_size(px(theme::CAPTION.px))
                 .text_color(t.muted)
-                .child("Start the server to type commands")
+                .child(tr("Start the server to type commands"))
                 .into_any_element()
         };
         plate(&t)
@@ -1804,7 +1756,7 @@ impl Launcher {
                     .px(px(20.))
                     .border_b_1()
                     .border_color(t.rule)
-                    .child(caps("Console").text_color(t.muted)),
+                    .child(caps(tr("Console")).text_color(t.muted)),
             )
             .child(log)
             .child(
@@ -2217,12 +2169,14 @@ impl Launcher {
         if self.servers.focused != Some(Field::Motd)
             && !self.servers.texts.contains_key(&Field::Motd)
         {
-            *self.servers.text(Field::Motd) = self.servers.shown("server", "motd");
+            let motd = self.servers.shown("server", "motd");
+            self.servers.text(Field::Motd).set(motd);
         }
         if self.servers.focused != Some(Field::Port)
             && !self.servers.texts.contains_key(&Field::Port)
         {
-            *self.servers.text(Field::Port) = self.servers.shown("server", "port");
+            let port = self.servers.shown("server", "port");
+            self.servers.text(Field::Port).set(port);
         }
         let save = |id: &'static str, f: Field, cx: &mut Context<Self>| {
             button(id, "Save", Kind::Secondary, &t).on_click(cx.listener(
@@ -2439,7 +2393,7 @@ impl Launcher {
             let delete = if ready {
                 delete.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.servers.confirm_delete = true;
-                    this.servers.text(Field::DeleteServer).clear();
+                    this.servers.text(Field::DeleteServer).set(String::new());
                     this.focus_handle(Field::DeleteServer, cx);
                     this.servers.focus_soon = Some(Field::DeleteServer);
                     cx.notify();
@@ -2765,8 +2719,7 @@ impl Launcher {
         let c = self.servers.create.as_ref()?;
         let (new_world, copy, worlds) = (c.new_world, c.copy.clone(), c.worlds.clone());
         let (mode, difficulty, max_players) = (c.mode, c.difficulty, c.max_players);
-        let (friends_only, check_accounts, eula, eula_missing) =
-            (c.friends_only, c.check_accounts, c.eula, c.eula_missing);
+        let (friends_only, eula, eula_missing) = (c.friends_only, c.eula, c.eula_missing);
         let creating = self.servers.creating;
         let row = |label: &'static str, control: AnyElement| {
             div()
@@ -2913,36 +2866,6 @@ impl Launcher {
                 .cursor_pointer()
                 .when(on, |d| d.child("✓"))
         };
-        let accounts = div()
-            .flex()
-            .items_start()
-            .gap(px(10.))
-            .child(
-                checkbox("create-accounts", check_accounts).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        if let Some(c) = &mut this.servers.create {
-                            c.check_accounts = !c.check_accounts;
-                        }
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        text(theme::UI)
-                            .text_color(t.ink)
-                            .child("Check Minecraft accounts"),
-                    )
-                    .child(text(theme::CAPTION).text_color(t.muted).child(
-                        "Only if every player signs in with Microsoft. Leave it off for Horizon \
-                         players without an account: Friends only keeps strangers out.",
-                    )),
-            );
         let eula_line = div()
             .flex()
             .items_center()
@@ -3033,7 +2956,6 @@ impl Launcher {
                             "The first one becomes an operator. Add more later on the Players tab.",
                         ))
                     })
-                    .child(accounts)
                     .into_any_element(),
             ))
             .child(eula_line);
@@ -3121,7 +3043,7 @@ impl Launcher {
                 .px(px(32.))
                 .py(px(24.))
                 .bg(t.page.opacity(0.92))
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .occlude()
                 .child(card),
         )
@@ -3131,16 +3053,16 @@ impl Launcher {
 /// The state, in a few words.
 fn phase_label(status: &Status) -> String {
     if let Some(busy) = &status.update_busy {
-        return format!("Updating: {busy}");
+        return trf("Updating: {step}", &[("step", busy)]);
     }
     match status.phase.as_str() {
-        "running" if status.crashes > 0 => "Running · restarted after a crash".into(),
-        "running" if status.paused => "Running · paused while nobody plays".into(),
-        "running" => "Running".into(),
-        "starting" => "Starting".into(),
-        "restarting" => "Restarting".into(),
-        "stopping" => "Stopping".into(),
-        _ => "Stopped".into(),
+        "running" if status.crashes > 0 => tr("Running · restarted after a crash").into(),
+        "running" if status.paused => tr("Running · paused while nobody plays").into(),
+        "running" => tr("Running").into(),
+        "starting" => tr("Starting").into(),
+        "restarting" => tr("Restarting").into(),
+        "stopping" => tr("Stopping").into(),
+        _ => tr("Stopped").into(),
     }
 }
 
@@ -3191,61 +3113,5 @@ mod tests {
         assert_eq!(backup_label(&b("odd.zip")), ("odd".into(), String::new()));
         assert_eq!(bytes(5_292_542), "5.3 MB");
         assert_eq!(uptime(3725), "1 h 02 min");
-        let mut long = "é".repeat(300);
-        clip(&mut long);
-        assert_eq!(long.chars().count(), 256);
-    }
-
-    /// The keyboard in a one-line field, as the Create dialog, Players, Settings and the console use it.
-    #[test]
-    fn fields_type_as_people_expect() {
-        let mut text = String::from("My server");
-        // The suggestion is selected: the first letter replaces it.
-        assert_eq!(
-            type_key(&mut text, true, "f", Some("F"), false),
-            Key::Edited
-        );
-        assert_eq!(text, "F");
-        // Space, which some platforms send without a character.
-        assert_eq!(
-            type_key(&mut text, false, "space", None, false),
-            Key::Edited
-        );
-        assert_eq!(
-            type_key(&mut text, false, "n", Some("N"), false),
-            Key::Edited
-        );
-        assert_eq!(text, "F N");
-        assert_eq!(
-            type_key(&mut text, false, "backspace", None, false),
-            Key::Edited
-        );
-        assert_eq!(text, "F ");
-        // Backspace on a suggestion clears it all.
-        let mut text = String::from("Server 2");
-        type_key(&mut text, true, "backspace", None, false);
-        assert_eq!(text, "");
-        // Paste replaces a suggestion too; the caller adds the clipboard.
-        let mut text = String::from("Server 2");
-        assert_eq!(type_key(&mut text, true, "v", Some("v"), true), Key::Paste);
-        assert_eq!(text, "");
-        // Tab, arrows and shortcuts aren't the field's: Tab moves the focus.
-        let mut text = String::from("Ludo");
-        for (key, ch, command) in [
-            ("tab", Some("\t"), false),
-            ("left", None, false),
-            ("a", Some("a"), true),
-        ] {
-            assert_eq!(type_key(&mut text, false, key, ch, command), Key::Pass);
-        }
-        assert_eq!(
-            type_key(&mut text, true, "enter", Some("\n"), false),
-            Key::Enter
-        );
-        assert_eq!(
-            type_key(&mut text, false, "escape", None, false),
-            Key::Escape
-        );
-        assert_eq!(text, "Ludo");
     }
 }

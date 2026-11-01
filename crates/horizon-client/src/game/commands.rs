@@ -3,6 +3,7 @@
 mod admin;
 pub(super) mod compute;
 mod data;
+pub(super) use data::place_summoned;
 mod effects;
 pub(super) mod execute;
 pub(super) mod extra;
@@ -11,8 +12,11 @@ mod misc;
 mod place;
 mod players;
 pub(super) mod pregen;
+mod profiles;
 mod raid;
 mod terrain_cmds;
+mod test_locate;
+mod test_runs;
 mod text_commands;
 mod world_cmds;
 
@@ -28,6 +32,7 @@ use horizon_client::{
     text::{self, Style, Text},
 };
 use horizon_core::{geometry::Vec3, random::RandomSource};
+use horizon_protocol::packets::play::{self, Clientbound as C};
 use horizon_world::registry::BlockStateId;
 
 pub(super) type R<T> = Result<T, CommandError>;
@@ -72,6 +77,11 @@ pub(in crate::game) struct OtherEntity {
 pub(super) fn err(key: &str, args: &[&dyn std::fmt::Display]) -> CommandError {
     CommandError::tr(key, args)
 }
+/// `EntityType.getDescriptionId`: `entity.<namespace>.<path>`.
+fn entity_name_key(id: &str) -> String {
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    format!("entity.{namespace}.{}", path.replace('/', "."))
+}
 fn texts(args: &[Text]) -> Vec<Text> {
     args.to_vec()
 }
@@ -87,11 +97,54 @@ fn java_float(v: f64) -> String {
 fn format_double(v: f64) -> String {
     format!("{v:.6}")
 }
+/// `EntitySelectorParser.createRotationPredicate`: the wrapped angle lies in
+/// the wrapped range, which runs through 180 when its minimum is above its
+/// maximum (defaults 0 and 359).
+fn rotation_in((lo, hi): (Option<f64>, Option<f64>), angle: f32) -> bool {
+    let min = wrap_degrees(lo.unwrap_or(0.0) as f32);
+    let max = wrap_degrees(hi.unwrap_or(359.0) as f32);
+    let angle = wrap_degrees(angle);
+    if min > max {
+        angle >= min || angle <= max
+    } else {
+        angle >= min && angle <= max
+    }
+}
+/// `Mth.wrapDegrees`.
+fn wrap_degrees(angle: f32) -> f32 {
+    let wrapped = angle % 360.0;
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else if wrapped < -180.0 {
+        wrapped + 360.0
+    } else {
+        wrapped
+    }
+}
 
+/// The network id of a target that is no player: its entity id.
+fn non_player_entity_id(t: Target) -> Option<i32> {
+    let (Target::Mob(id)
+    | Target::Item(id)
+    | Target::Orb(id)
+    | Target::Projectile(id)
+    | Target::Stand(id)
+    | Target::Frame(id)
+    | Target::Painting(id)
+    | Target::Boat(id)
+    | Target::Cart(id)
+    | Target::Other(id)
+    | Target::Crystal(id)
+    | Target::Dragon(id)) = t
+    else {
+        return None;
+    };
+    i32::try_from(id).ok()
+}
 impl Game<'_> {
     /// Commands.performCommand for a line without its slash.
     pub(super) fn run_command(&mut self, command: &str) -> bool {
-        if self.mod_command(command) {
+        if self.client_mod_command(command) {
             return true;
         }
         let d = vanilla::game_dispatcher();
@@ -176,7 +229,29 @@ impl Game<'_> {
             self.command_block_output(block, message);
             return;
         }
+        if let Some(cart) = self.command_source.and_then(|s| s.cart) {
+            self.cart_command_output(cart, message);
+            return;
+        }
         self.system_message(message);
+    }
+    /// `sendSuccess(message, false)`: the source is told (when it takes
+    /// success feedback), the operators are not.
+    pub(super) fn feedback_unbroadcast(&mut self, message: Text) {
+        if self.command_source.is_some_and(|s| s.silent) {
+            return;
+        }
+        if let Some(block) = self.command_source.and_then(|s| s.block) {
+            self.command_block_success(block, message);
+            return;
+        }
+        if let Some(cart) = self.command_source.and_then(|s| s.cart) {
+            self.cart_command_success(cart, message);
+            return;
+        }
+        if self.ui.rules.bool("send_command_feedback") {
+            self.system_message(message);
+        }
     }
     /// sendSuccess honouring `send_command_feedback`.
     pub(super) fn feedback(&mut self, message: Text) {
@@ -185,6 +260,10 @@ impl Game<'_> {
         }
         if let Some(block) = self.command_source.and_then(|s| s.block) {
             self.command_block_success(block, message);
+            return;
+        }
+        if let Some(cart) = self.command_source.and_then(|s| s.cart) {
+            self.cart_command_success(cart, message);
             return;
         }
         if self.ui.rules.bool("send_command_feedback") {
@@ -301,9 +380,7 @@ impl Game<'_> {
         if dimension != self.dim || !self.world.chunks.contains_key(&(p[0] >> 4, p[2] >> 4)) {
             return Err(err("argument.pos.unloaded", &[]));
         }
-        if p[1] < horizon_client::chunk::MIN_Y
-            || p[1] >= horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT
-        {
+        if p[1] < self.world.bottom_y() || p[1] >= self.world.top_y() {
             return Err(err("argument.pos.outofworld", &[]));
         }
         Ok(p)
@@ -655,6 +732,18 @@ impl Game<'_> {
                 {
                     return None;
                 }
+                // x_rotation is the pitch, y_rotation the yaw (getXRot, getYRot).
+                let [yaw, pitch] = self.target_rotation(t);
+                if let Some(range) = s.x_rotation
+                    && !rotation_in(range, pitch)
+                {
+                    return None;
+                }
+                if let Some(range) = s.y_rotation
+                    && !rotation_in(range, yaw)
+                {
+                    return None;
+                }
                 if s.delta.iter().any(Option::is_some) {
                     let d = s.delta.map(|v| v.unwrap_or(0.0));
                     for i in 0..3 {
@@ -689,7 +778,14 @@ impl Game<'_> {
                 .iter()
                 // The kinds /data can write (entity_nbt).
                 .filter(|p| {
-                    p.is_arrow() || matches!(p.kind, K::LargeFireball { .. } | K::SmallFireball)
+                    p.is_arrow()
+                        || matches!(
+                            p.kind,
+                            K::LargeFireball { .. }
+                                | K::SmallFireball
+                                | K::WindCharge
+                                | K::BreezeWindCharge
+                        )
                 })
                 .map(|p| Target::Projectile(p.id)),
         );
@@ -718,6 +814,27 @@ impl Game<'_> {
             Dim::End => 2,
         });
         dims
+    }
+    /// `Level.getEntity`: the entity of the level in place with a network
+    /// id, players aside.
+    pub(in crate::game) fn level_entity(&self, id: i32) -> Option<Target> {
+        let id = u32::try_from(id).ok()?;
+        [
+            Target::Mob(id),
+            Target::Item(id),
+            Target::Orb(id),
+            Target::Projectile(id),
+            Target::Stand(id),
+            Target::Frame(id),
+            Target::Painting(id),
+            Target::Boat(id),
+            Target::Cart(id),
+            Target::Other(id),
+            Target::Crystal(id),
+            Target::Dragon(id),
+        ]
+        .into_iter()
+        .find(|t| self.level_holds(*t))
     }
     /// Whether the level in place holds the entity a target names.
     fn level_holds(&self, t: Target) -> bool {
@@ -860,6 +977,10 @@ impl Game<'_> {
             id if id.starts_with("dialog.") => self.cmd_dialog(id, ctx),
             id if id.starts_with("posteffect.") => self.cmd_posteffect(id, ctx),
             "kick" => self.cmd_kick(ctx),
+            "op" | "deop" | "ban" | "pardon" => self.cmd_profiles(id, ctx),
+            "ban-ip" | "pardon-ip" => self.cmd_ip_bans(id, ctx),
+            id if id.starts_with("banlist") => self.cmd_banlist(id),
+            id if id.starts_with("whitelist.") => self.cmd_whitelist(id, ctx),
             "fetchprofile" => self.cmd_fetchprofile(ctx),
             "publish" => self.cmd_publish(ctx),
             "unpublish" => self.cmd_unpublish(),
@@ -925,24 +1046,7 @@ impl Game<'_> {
                 Ok(1)
             }
             "say" | "me" | "msg" => self.cmd_say(id, ctx),
-            "list" => {
-                let names = if ctx.has("uuids") {
-                    Text::translate(
-                        "commands.list.nameAndId",
-                        &[
-                            Text::literal(PLAYER_NAME),
-                            Text::literal(self.player_uuid_string()),
-                        ],
-                    )
-                } else {
-                    Text::literal(PLAYER_NAME)
-                };
-                self.system_message(Text::translate(
-                    "commands.list.players",
-                    &[Text::literal("1"), Text::literal("8"), names],
-                ));
-                Ok(1)
-            }
+            "list" => self.cmd_list(ctx),
             _ => Err(err("command.failed", &[])),
         }
     }
@@ -1048,9 +1152,14 @@ impl Game<'_> {
     pub(super) fn stack_display_name(&self, s: &ItemStack) -> Text {
         let item = &*s.item;
         let empty = item == "minecraft:air" || s.count == 0;
-        let custom = s.custom_name();
+        let custom = s.data().and_then(|data| data.custom_name.as_ref());
         let hover = if let Some(c) = custom {
-            Text::literal(c)
+            horizon_client::component::name_text(c)
+        } else if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
+            // `ItemStack.getItemName`: the `item_name` component wins over the
+            // item's own name (`Item.getName`), so a datapack's or a server's
+            // renaming shows here as it does on the tooltip's first line.
+            horizon_client::component::name_text(name)
         } else if let Some(title) = s
             .data()
             .and_then(|d| d.written.as_ref())
@@ -1070,6 +1179,13 @@ impl Game<'_> {
                 &horizon_client::brewing::potion_name_key(item, s.potion()),
                 &[],
             )
+        } else if item == "minecraft:shield"
+            && let Some(color) = s.data().and_then(|d| d.base_color.as_deref())
+        {
+            // `ShieldItem.getName`: the banner's base colour names the shield.
+            Text::translate(&format!("item.minecraft.shield.{color}"), &[])
+        } else if let Some(head) = horizon_client::item_tooltip::player_head_name(s) {
+            head.text()
         } else {
             // Item.getDescriptionId: a block item's is the block's.
             let (namespace, path) = item.split_once(':').unwrap_or(("minecraft", item));
@@ -1117,21 +1233,11 @@ impl Game<'_> {
         static RARITY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
             std::sync::OnceLock::new();
         let map = RARITY.get_or_init(|| {
-            let v: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(self.options.resources.join("items.json")).unwrap_or_default(),
-            )
-            .unwrap_or_default();
-            v.as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter_map(|(k, c)| {
-                            c["minecraft:rarity"]
-                                .as_str()
-                                .map(|r| (k.clone(), r.to_owned()))
-                        })
-                        .collect()
-                })
+            horizon_world::item_defaults::read(&self.options.resources)
                 .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(k, c)| c["minecraft:rarity"].as_str().map(|r| (k, r.to_owned())))
+                .collect()
         });
         map.get(item).cloned().unwrap_or_else(|| "common".into())
     }
@@ -1149,7 +1255,7 @@ impl Game<'_> {
         };
         let count = Self::int(ctx, "count").unwrap_or(1);
         let targets = self.entities(ctx, "targets", true)?;
-        let max_stack = self.res.items().get(&id).map_or(64, |i| i.max_stack) as i32;
+        let max_stack = self.items().get(&id).map_or(64, |i| i.max_stack) as i32;
         if count > max_stack * 100 {
             return Err(CommandError::new(Text::translate(
                 "commands.give.failed.toomanyitems",
@@ -1197,7 +1303,7 @@ impl Game<'_> {
                             p[2],
                         ]);
                         g.throw_from_eyes(rest, eye, false);
-                        if let Some(item) = g.dropped.last_mut() {
+                        if let Some(item) = g.just_spawned_item() {
                             item.thrower = None;
                             item.pickup_delay = 0;
                             item.target = uuid;
@@ -1376,7 +1482,8 @@ impl Game<'_> {
             self.player = Some(player);
             return Err(err("command.failed", &[]));
         }
-        self.trigger_dimension(from, dimension);
+        let at = player.position;
+        self.trigger_dimension(from, dimension, [at.x, at.y, at.z]);
         let target = Vec3::new(pos[0], pos[1], pos[2]);
         player.position = target;
         player.velocity = Vec3::ZERO;
@@ -1425,11 +1532,62 @@ impl Game<'_> {
             });
         true
     }
+    /// `ServerPlayer.lookAt`: besides turning the player, tell their client
+    /// with a `ClientboundPlayerLookAtPacket` (`from` anchor, the point, and
+    /// the entity with its anchor when the target is one). Only a connected
+    /// player has a client to tell. The entity form is sent whenever the
+    /// target is an entity with a network id (`LookAt.LookAtEntity.perform`);
+    /// a player whose id is not known here (a guest's turn, with the host
+    /// out of reach) falls back to the point, which a client takes the same
+    /// unless the entity moves first.
+    /// `Entity.getId` as the players' clients know it: a player's is the one the
+    /// hub gave it, any other entity's is its own id.
+    pub(super) fn network_entity_id(&self, t: Target) -> Option<i32> {
+        let host = self.lan.as_ref();
+        match t {
+            Target::Player => match self.lan_acting {
+                Some(conn) => host?.hub.guest(conn).map(|g| g.entity_id),
+                None => host.map(|h| h.host_entity),
+            },
+            Target::Guest(conn) => host?.hub.guest(conn).map(|g| g.entity_id),
+            other => non_player_entity_id(other),
+        }
+    }
+    pub(super) fn send_player_look_at(
+        &mut self,
+        t: Target,
+        from_eyes: bool,
+        target: [f64; 3],
+        entity: Option<(Target, bool)>,
+    ) {
+        let packet = C::PlayerLookAt(play::PlayerLookAt {
+            from: i32::from(from_eyes),
+            target,
+            entity: entity.and_then(|(e, eyes)| {
+                Some(play::LookAtEntity {
+                    id: self.network_entity_id(e)?,
+                    anchor: i32::from(eyes),
+                })
+            }),
+        });
+        match t {
+            Target::Player if self.lan_acting.is_some() => self.guest_packets.push(packet),
+            Target::Guest(conn) => {
+                if let Some(host) = self.lan.as_ref() {
+                    host.hub.send_to(conn, &packet);
+                }
+            }
+            _ => {}
+        }
+    }
     fn cmd_teleport(&mut self, id: &str, ctx: &Context) -> R<i32> {
         let targets = if id.starts_with("teleport.targets") {
             self.entities(ctx, "targets", false)?
         } else {
-            vec![self.implied_player()]
+            vec![
+                self.source_entity()
+                    .ok_or_else(|| err("permissions.requires.entity", &[]))?,
+            ]
         };
         if id.ends_with("destination") {
             let dest = self.entities(ctx, "destination", false)?[0];
@@ -1480,12 +1638,14 @@ impl Game<'_> {
             };
             None
         });
+        let mut facing_entity = None;
         let facing = match (facing, ctx.get("facingEntity")) {
             (Some(f), _) => Some(f),
             (None, Some(_)) => {
                 let e = self.entities(ctx, "facingEntity", false)?[0];
                 // EntityAnchorArgument.Anchor.apply: the feet, or the eyes.
                 let eyes = matches!(ctx.get("facingAnchor"), Some(Arg::Anchor(true)));
+                facing_entity = Some((e, eyes));
                 let eye_height = if eyes { self.target_eye_height(e) } else { 0.0 };
                 self.target_position(e)
                     .map(|p| [p[0], p[1] + eye_height, p[2]])
@@ -1527,6 +1687,10 @@ impl Game<'_> {
                 self.teleport_player_to_dimension(dimension, pos, rotation)?;
             } else {
                 self.teleport_to(t, pos, rotation);
+            }
+            // LookAt.perform after a successful teleportTo.
+            if let Some(f) = facing {
+                self.send_player_look_at(t, anchored_eyes, f, facing_entity);
             }
         }
         let [x, y, z] = pos.map(|v| Text::literal(format_double(v)));
@@ -1725,7 +1889,7 @@ impl Game<'_> {
         self.feedback(Text::translate(key, &[]));
         Ok(duration.unwrap_or(-1))
     }
-    fn kill_target(&mut self, t: Target) {
+    pub(super) fn kill_target(&mut self, t: Target) {
         // An entity in another level is killed in the level that holds it.
         let _ = self.in_target_level(t, |g| g.kill_target_in_level(t));
     }
@@ -1742,13 +1906,27 @@ impl Game<'_> {
             }
             Target::Mob(id) => {
                 if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    // LivingEntity.kill: a generic_kill hit of Float.MAX_VALUE,
+                    // which its death message tells.
+                    if m.alive() {
+                        m.record_damage(
+                            horizon_client::mobs::Damage::of(
+                                horizon_client::mobs::DamageKind::GenericKill,
+                            ),
+                            f32::MAX,
+                        );
+                    }
                     m.health = 0.0;
                     if m.death_time == 0 {
                         m.death_time = 1;
                     }
                 }
             }
-            Target::Item(id) => self.dropped.retain(|i| i.id != id),
+            Target::Item(id) => {
+                if let Some(i) = self.dropped.iter().position(|i| i.id == id) {
+                    self.remove_dropped(i);
+                }
+            }
             Target::Orb(id) => {
                 if let Some(o) = self.orbs.iter_mut().find(|o| o.id == id) {
                     o.age = u32::MAX / 2;
@@ -1758,16 +1936,34 @@ impl Game<'_> {
                 self.creatures.projectiles.retain(|p| p.id != id);
             }
             Target::Stand(id) => self.armor_stands.retain(|a| a.id != id),
-            Target::Frame(id) => self.item_frames.retain(|f| f.id != id),
+            Target::Frame(id) => {
+                // ItemFrame.onKilled.
+                if let Some(frame) = self.item_frames.iter().find(|f| f.id == id).cloned() {
+                    self.remove_framed_map(&frame);
+                }
+                self.item_frames.retain(|f| f.id != id);
+            }
             Target::Painting(id) => self.paintings.retain(|p| p.id != id),
-            Target::Boat(id) => self.boats.retain(|b| b.id != id),
-            Target::Cart(id) => self.carts.retain(|c| c.id != id),
+            Target::Boat(id) => {
+                // AbstractBoat.remove: a killed boat drops its lead.
+                if let Some(i) = self.boats.iter().position(|b| b.id == id) {
+                    self.release_vehicle_container(id);
+                    let b = self.boats.remove(i);
+                    self.boat_removed(&b);
+                }
+            }
+            Target::Cart(id) => {
+                self.release_vehicle_container(id);
+                self.carts.retain(|c| c.id != id);
+            }
             Target::Other(id) => self.others.retain(|o| o.id != id),
             Target::Crystal(id) => self.kill_crystal(id),
             Target::Dragon(id) => self.kill_dragon(id),
         }
         // The orbs marked for removal are gone (Entity.kill removes them).
+        let before = self.orb_ids();
         self.orbs.retain(|o| o.age < u32::MAX / 2);
+        self.native_orbs_left_since(&before);
     }
     fn cmd_kill(&mut self, ctx: &Context) -> R<i32> {
         let targets = if ctx.get("targets").is_some() {
@@ -1823,18 +2019,18 @@ impl Game<'_> {
                 && self
                     .res
                     .mob_types()
-                    .get(&format!("minecraft:{short}"))
+                    .get(&kind)
                     .is_some_and(|t| t.category == "monster")
             {
                 return Err(err("commands.summon.failed.peaceful", &[]));
             }
             let before = self.spawned_mark();
-            let name = match self.summon_with_nbt(&format!("minecraft:{short}"), pos, &nbt)? {
+            let name = match self.summon_with_nbt(&kind, pos, &nbt)? {
                 Some(target) => self.target_name(target),
                 // Spawned as a kind no command target stands for (primed
                 // TNT, falling blocks, projectiles): its type's name.
                 None if self.spawned_mark() != before => {
-                    Text::translate(&format!("entity.minecraft.{short}"), &[])
+                    Text::translate(&entity_name_key(&kind), &[])
                 }
                 None => return Err(err("commands.summon.failed", &[])),
             };
@@ -1842,17 +2038,12 @@ impl Game<'_> {
             return Ok(1);
         }
         let name;
-        if let Some(t) = self
-            .res
-            .mob_types()
-            .get(&format!("minecraft:{short}"))
-            .cloned()
-        {
+        if let Some(t) = self.res.mob_types().get(&kind).cloned() {
             if self.ui.difficulty == 0 && t.category == "monster" {
                 return Err(err("commands.summon.failed.peaceful", &[]));
             }
             self.spawn_mob_spawned(&short, pos);
-            name = Text::translate(&format!("entity.minecraft.{short}"), &[]);
+            name = Text::translate(&entity_name_key(&kind), &[]);
         } else {
             match short.as_str() {
                 "item" => {
@@ -1860,18 +2051,32 @@ impl Game<'_> {
                     return Err(err("commands.summon.failed", &[]));
                 }
                 "experience_orb" => {
+                    // `new ExperienceOrb(level, pos, Vec3.ZERO, 0)`, unstuck
+                    // like any other orb spawn.
+                    let at = self.unstuck_orb(pos);
                     self.next_entity += 1;
                     self.orbs.push(horizon_client::entities::ExperienceOrb {
                         id: self.next_entity,
-                        position: Vec3::new(pos[0], pos[1], pos[2]),
-                        previous: Vec3::new(pos[0], pos[1], pos[2]),
+                        position: Vec3::new(at[0], at[1], at[2]),
+                        previous: Vec3::new(at[0], at[1], at[2]),
                         velocity: Vec3::new(0.0, 0.0, 0.0),
                         value: 0,
                         age: 0,
                         on_ground: false,
                         count: 1,
                         ticks: 0,
+                        health: 5,
                     });
+                    // tryAddFreshEntityWithPassengers refused: ERROR_DUPLICATE_UUID.
+                    if !self.native_entity_joins(
+                        self.next_entity,
+                        "minecraft:experience_orb",
+                        pos,
+                        false,
+                    ) {
+                        self.orbs.pop();
+                        return Err(err("commands.summon.failed.uuid", &[]));
+                    }
                     name = Text::translate("entity.minecraft.experience_orb", &[]);
                 }
                 "lightning_bolt" => {
@@ -1896,11 +2101,19 @@ impl Game<'_> {
                     let cart_kind = super::minecarts::CartKind::from_id(&kind)
                         .unwrap_or(super::minecarts::CartKind::Rideable);
                     self.next_entity += 1;
-                    let cart = super::minecarts::Minecart::new(
+                    let mut cart = super::minecarts::Minecart::new(
                         self.next_entity,
                         cart_kind,
                         Vec3::new(pos[0], pos[1], pos[2]),
                     );
+                    // SummonCommand.createEntity loads even an empty compound, so a
+                    // spawner minecart's BaseSpawner.load runs: SpawnPotentials becomes
+                    // WeightedList.of(new SpawnData()).
+                    if cart.spawner.is_some() {
+                        use horizon_client::mobs::spawner::{Spawner, SpawnerExt};
+                        let empty = horizon_world::nbt::Tag::Compound(Default::default());
+                        cart.spawner = Some(Box::new(Spawner::load(&empty)));
+                    }
                     self.carts.push(cart);
                     name = Text::translate(&format!("entity.minecraft.{k}"), &[]);
                 }
@@ -1912,7 +2125,7 @@ impl Game<'_> {
                         // Spawned as a kind no command target stands for
                         // (primed TNT, falling blocks, projectiles).
                         None if self.spawned_mark() != before => {
-                            Text::translate(&format!("entity.minecraft.{short}"), &[])
+                            Text::translate(&entity_name_key(&kind), &[])
                         }
                         None => return Err(err("commands.summon.failed", &[])),
                     };
@@ -1928,7 +2141,10 @@ impl Game<'_> {
     fn spawned_mark(&self) -> (u32, usize) {
         (
             self.next_entity,
-            self.tnts.len() + self.falling.len() + self.creatures.projectiles.len(),
+            self.tnts.len()
+                + self.falling.len()
+                + self.creatures.projectiles.len()
+                + self.rockets.len(),
         )
     }
     /// BlockStateArgument -> registry state.
@@ -1954,7 +2170,7 @@ impl Game<'_> {
                 .items()
                 .block_tags
                 .get(tag)
-                .or_else(|| self.res.items().block_tags.get(&b.id))
+                .or_else(|| self.items().block_tags.get(&b.id))
                 .is_some_and(|set| {
                     set.contains(&s.name) || set.contains(s.name.trim_start_matches("minecraft:"))
                 })
@@ -2011,7 +2227,7 @@ impl Game<'_> {
         let landed = self.world.block(pos[0], pos[1], pos[2]);
         if old != new
             && self.res.facts().get(landed).name == new
-            && let Some(entity) = horizon_client::containers::BlockEntity::for_block(&new)
+            && let Some(entity) = self.new_block_entity(&new)
         {
             self.world.block_entities.insert(key, entity);
         }
@@ -2023,6 +2239,10 @@ impl Game<'_> {
             return Ok(0);
         };
         let state = self.block_state(&b)?;
+        // SetBlockCommand.setBlock: `ServerLevel.isDebug` fails it.
+        if self.world_debug {
+            return Err(err("commands.setblock.failed", &[]));
+        }
         let current = self.world.block(pos[0], pos[1], pos[2]);
         if ctx.has("keep") && current != self.world.air {
             return Err(err("commands.setblock.failed", &[]));
@@ -2078,12 +2298,60 @@ impl Game<'_> {
         };
         let rolled = self.take_loot_table(key, &tag, &mut new);
         let after = horizon_client::save::encode_block_entity(key, &new, &name);
-        if after == before && !rolled {
+        // The lock is outside the model: a tag that only changes it still
+        // changes the block entity.
+        let lock_changed = self.world.block_lock(key) != tag.get("lock");
+        if after == before && !rolled && !lock_changed {
             return false;
         }
         self.world.block_entities.insert(key, new);
+        self.world.set_block_lock(key, &tag);
+        self.update_spawner_display(key);
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
         true
+    }
+    /// `RandomizableContainer.unpackLootTable` for a player who opens a
+    /// container: a roll the container still holds fires
+    /// `player_generates_container_loot` for its table, and from then on the
+    /// container saves its items, not the table.
+    pub(super) fn unpack_opened_loot(&mut self, key: (i32, i32, i32), name: &str) {
+        let Some(rolled) = self
+            .world
+            .chunks
+            .get(&(key.0 >> 4, key.2 >> 4))
+            .and_then(|c| c.saved.as_ref())
+            .and_then(|s| s.rolled_loot.iter().find(|r| r.pos == key))
+            .cloned()
+        else {
+            return;
+        };
+        // The roll is still there only while the container holds exactly its items.
+        let still_rolled = self
+            .world
+            .block_entities
+            .get_mut(&key)
+            .is_some_and(|entity| {
+                let mut tag = horizon_client::save::encode_block_entity(key, entity, name);
+                match &mut tag {
+                    horizon_world::nbt::Tag::Compound(map) => rolled.restore(map),
+                    _ => false,
+                }
+            });
+        if still_rolled {
+            self.trigger_loot_table(&rolled.table);
+        }
+        let Some(chunk) = self.world.chunks.get_mut(&(key.0 >> 4, key.2 >> 4)) else {
+            return;
+        };
+        let chunk = std::sync::Arc::make_mut(chunk);
+        let mut extras = chunk
+            .saved
+            .take()
+            .map(std::sync::Arc::unwrap_or_clone)
+            .unwrap_or_default();
+        extras.rolled_loot.retain(|r| r.pos != key);
+        chunk.saved = Some(std::sync::Arc::new(extras));
+        self.world.modified.insert((key.0 >> 4, key.2 >> 4));
     }
     /// RandomizableContainer.tryLoadLootTable for a tag a command gives a
     /// container (`setblock`, `data`): an empty container with a `LootTable`
@@ -2101,7 +2369,7 @@ impl Game<'_> {
         let table = save::text(tag.get("LootTable"));
         let rolled = match (table, entity) {
             (Some(table), BlockEntity::Chest(slots)) if slots.iter().all(Option::is_none) => {
-                let loot = structure_blocks::loot_data(&self.options.resources);
+                let loot = structure_blocks::loot_data(&self.options.resources, &self.pack_files());
                 let at = Vec3::new(f64::from(key.0), f64::from(key.1), f64::from(key.2));
                 let biome = self.biome_name_at(at).unwrap_or_default();
                 Some(structure_blocks::roll_container(
@@ -2177,6 +2445,10 @@ impl Game<'_> {
         if area > i64::from(limit) {
             return Err(err("commands.fill.toobig", &[&limit, &area]));
         }
+        // FillCommand.fillBlocks: `ServerLevel.isDebug` fails it.
+        if self.world_debug {
+            return Err(err("commands.fill.failed", &[]));
+        }
         let state = self.block_state(&block)?;
         let air = self.world.air;
         let (hollow, outline, destroy, strict, keep) = (
@@ -2187,6 +2459,11 @@ impl Game<'_> {
             ctx.has("keep"),
         );
         let mut count = 0;
+        // Whether the filter takes a state, worked out once per state: a fill visits up to 32768 blocks of a handful
+        // of states, and matching a tag is a name lookup.
+        let mut matched: std::collections::HashMap<BlockStateId, bool> =
+            std::collections::HashMap::new();
+        let plain = !(destroy || hollow || outline);
         for y in min[1]..=max[1] {
             for z in min[2]..=max[2] {
                 for x in min[0]..=max[0] {
@@ -2194,10 +2471,22 @@ impl Game<'_> {
                     if keep && current != air {
                         continue;
                     }
-                    if let Some(f) = &filter
-                        && !self.block_matches(f, current)
-                    {
+                    // Already the block it would become: nothing to place (place_state would do nothing either).
+                    if plain && current == state {
                         continue;
+                    }
+                    if let Some(f) = &filter {
+                        let ok = match matched.get(&current) {
+                            Some(&ok) => ok,
+                            None => {
+                                let ok = self.block_matches(f, current);
+                                matched.insert(current, ok);
+                                ok
+                            }
+                        };
+                        if !ok {
+                            continue;
+                        }
                     }
                     let edge = x == min[0]
                         || x == max[0]
@@ -2256,6 +2545,10 @@ impl Game<'_> {
             if !self.world.chunks.contains_key(&(p[0] >> 4, p[2] >> 4)) {
                 return Err(err("argument.pos.unloaded", &[]));
             }
+        }
+        // CloneCommands.clone: the destination level being a Debug world fails it.
+        if self.world_debug {
+            return Err(err("commands.clone.failed", &[]));
         }
         let filter = match ctx.get("filter") {
             Some(Arg::Block(f)) => Some(f.clone()),
@@ -2572,14 +2865,30 @@ impl Game<'_> {
                 &[name(i)],
             )));
         }
+        self.set_difficulty_forced(i);
+        self.feedback(Text::translate("commands.difficulty.success", &[name(i)]));
+        Ok(0)
+    }
+    /// `MinecraftServer.setDifficulty(difficulty, true)`.
+    pub(super) fn set_difficulty_forced(&mut self, i: u8) {
         self.ui.difficulty = i;
+        // The level data holds the world's difficulty: it survives the
+        // reopen, so it follows the command.
+        self.level.set_difficulty(i);
         self.sync_rules();
         if i == 0 {
             // Peaceful removes hostile mobs.
             self.mobs.retain(|m| !m.hostile());
         }
-        self.feedback(Text::translate("commands.difficulty.success", &[name(i)]));
-        Ok(0)
+        // MinecraftServer.setDifficulty: every player, guests included, is
+        // sent the new difficulty.
+        if let Some(host) = self.lan.as_ref() {
+            host.hub
+                .broadcast(&C::ChangeDifficulty(play::ChangeDifficulty {
+                    difficulty: i32::from(i),
+                    locked: self.level.difficulty_locked,
+                }));
+        }
     }
     fn cmd_spawnpoint(&mut self, ctx: &Context) -> R<i32> {
         let targets = if ctx.get("targets").is_some() {
@@ -2696,7 +3005,7 @@ impl Game<'_> {
                 .items()
                 .item_tags
                 .get(tag)
-                .or_else(|| self.res.items().item_tags.get(&predicate.id))
+                .or_else(|| self.items().item_tags.get(&predicate.id))
                 .is_some_and(|s| {
                     s.contains(item) || s.contains(item.trim_start_matches("minecraft:"))
                 });
@@ -2927,7 +3236,7 @@ impl Game<'_> {
                     if !section.blocks.maybe_has(&mut wanted_state) {
                         continue;
                     }
-                    let base_y = horizon_client::chunk::MIN_Y + 16 * i as i32;
+                    let base_y = self.world.bottom_y() + 16 * i as i32;
                     for j in 0..4096 {
                         let state = section.get(j);
                         let Some(kind) = cache.get(&state).copied().flatten() else {
@@ -2989,8 +3298,8 @@ impl Game<'_> {
                 radius: 6400,
                 horizontal: 32,
                 vertical: 64,
-                min_y: horizon_client::chunk::MIN_Y,
-                max_y: horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1,
+                min_y: self.world.bottom_y(),
+                max_y: self.world.top_y() - 1,
             };
             let found = self
                 .end
@@ -3075,13 +3384,30 @@ impl Game<'_> {
                 .options
                 .resources
                 .join(format!("data/{ns}/tags/{registry}/{path}.json"));
-            let Ok(v) = std::fs::read(file)
-                .map_err(|_| ())
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| ()))
-            else {
-                continue;
-            };
-            for e in v["values"].as_array().into_iter().flatten() {
+            // The game's file and the world's packs' both count, entries
+            // joined in resource-stack order; a pack file with `replace`
+            // drops what the lower sources put in (`TagLoader.load`).
+            let packed = self
+                .fns
+                .store
+                .files
+                .get(&format!("tags/{ns}:{registry}/{path}"))
+                .into_iter()
+                .flatten()
+                .filter_map(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let parsed = std::fs::read(file)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .into_iter()
+                .chain(packed);
+            let mut entries = Vec::new();
+            for v in parsed {
+                if v["replace"].as_bool() == Some(true) {
+                    entries.clear();
+                }
+                entries.extend(v["values"].as_array().into_iter().flatten().cloned());
+            }
+            for e in &entries {
                 let id = e.as_str().or_else(|| e["id"].as_str()).unwrap_or_default();
                 match id.strip_prefix('#') {
                     Some(nested) => pending.push(nested.to_owned()),
@@ -3091,6 +3417,63 @@ impl Game<'_> {
             }
         }
         out
+    }
+    /// ListPlayersCommand: every online player, the host of a hosted world
+    /// first and then the guests in join order, with the count and the max.
+    fn cmd_list(&mut self, ctx: &Context) -> R<i32> {
+        // A single-player owner is a placed guest of the in-process server, so
+        // it is the host and needs no entry of its own.
+        let owner_listed = self
+            .lan
+            .as_ref()
+            .is_some_and(|h| h.hub.singleplayer_owner.is_some());
+        // The host is online unless this is a dedicated server, which has none.
+        let host = (self.options.dedicated.is_none() && !owner_listed).then(|| match &self.lan {
+            Some(h) => (h.host_uuid, h.host_name.clone()),
+            None => (self.player_uuid(), PLAYER_NAME.to_owned()),
+        });
+        let guests = self
+            .lan
+            .iter()
+            .flat_map(|h| h.hub.guests.iter())
+            .filter(|g| g.placed)
+            .map(|g| (g.uuid, g.name.clone()));
+        let players: Vec<(u128, String)> = host.into_iter().chain(guests).collect();
+        let max = self
+            .lan
+            .as_ref()
+            .map_or(horizon_client::lan::MAX_PLAYERS, |h| {
+                h.hub.lan.shared.max_players()
+            });
+        let uuids = ctx.has("uuids");
+        let mut names = Text::empty();
+        for (k, (uuid, name)) in players.iter().enumerate() {
+            if k > 0 {
+                // ComponentUtils.formatList: gray commas.
+                names.push(Text::colored(", ", text::GRAY));
+            }
+            if uuids {
+                names.push(Text::translate(
+                    "commands.list.nameAndId",
+                    &[
+                        Text::literal(name.as_str()),
+                        Text::literal(horizon_protocol::crypto::uuid_string(*uuid)),
+                    ],
+                ));
+            } else {
+                names.push(self.player_text(name, *uuid));
+            }
+        }
+        let count = players.len();
+        self.system_message(Text::translate(
+            "commands.list.players",
+            &[
+                Text::literal(count.to_string()),
+                Text::literal(max.to_string()),
+                names,
+            ],
+        ));
+        Ok(count as i32)
     }
     fn cmd_say(&mut self, id: &str, ctx: &Context) -> R<i32> {
         let raw = match ctx.get(if id == "me" { "action" } else { "message" }) {
@@ -3201,4 +3584,43 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     }
     out.push(&s[start..]);
     out
+}
+
+#[cfg(test)]
+mod summon_tests {
+    #[test]
+    fn a_summoned_entity_is_named_from_its_own_namespace() {
+        use super::entity_name_key;
+        assert_eq!(
+            entity_name_key("minecraft:snowball"),
+            "entity.minecraft.snowball"
+        );
+        assert_eq!(entity_name_key("ruby:bolt"), "entity.ruby.bolt");
+        assert_eq!(entity_name_key("ruby:spell/bolt"), "entity.ruby.spell.bolt");
+    }
+}
+
+#[cfg(test)]
+mod look_at_tests {
+    use super::{Target, non_player_entity_id};
+
+    #[test]
+    fn look_at_entity_form_names_any_entity_by_its_id() {
+        for t in [
+            Target::Mob(7),
+            Target::Item(7),
+            Target::Orb(7),
+            Target::Projectile(7),
+            Target::Boat(7),
+            Target::Cart(7),
+            Target::Crystal(7),
+            Target::Dragon(7),
+        ] {
+            assert_eq!(non_player_entity_id(t), Some(7), "{t:?}");
+        }
+        // Players are the hub's to name; a dragon part's id is no entity id.
+        assert_eq!(non_player_entity_id(Target::Player), None);
+        assert_eq!(non_player_entity_id(Target::Guest(3)), None);
+        assert_eq!(non_player_entity_id(Target::Mob(u32::MAX - 4096)), None);
+    }
 }

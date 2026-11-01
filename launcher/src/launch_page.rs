@@ -29,9 +29,18 @@ impl Launcher {
         let Some(i) = self.selected_instance().cloned() else {
             return;
         };
-        *self.servers.text(Field::PreLaunch) = i.launch.pre_launch.clone();
-        *self.servers.text(Field::Wrapper) = i.launch.wrapper.clone();
-        *self.servers.text(Field::LaunchEnv) = launch::env_line(&i.launch.env);
+        self.servers
+            .text(Field::PreLaunch)
+            .set(i.launch.pre_launch.clone());
+        self.servers
+            .text(Field::Wrapper)
+            .set(i.launch.wrapper.clone());
+        self.servers
+            .text(Field::LaunchEnv)
+            .set(launch::env_line(&i.launch.env));
+        self.servers
+            .text(Field::PostExit)
+            .set(i.launch.post_exit.clone());
         self.launch = Some(LaunchPanel {
             instance: i.id,
             saved: None,
@@ -45,20 +54,22 @@ impl Launcher {
         };
         let pre = self.servers.value(Field::PreLaunch).trim().to_string();
         let wrapper = self.servers.value(Field::Wrapper).trim().to_string();
+        let post_exit = self.servers.value(Field::PostExit).trim().to_string();
         let saved = launch::parse_env(self.servers.value(Field::LaunchEnv)).and_then(|env| {
             instances::edit(&id, |m| {
                 m.launch = launch::Launch {
                     pre_launch: pre,
                     wrapper,
                     env,
+                    post_exit,
                     ..m.launch.clone()
                 }
             })
         });
         let saved = saved.map(|i| {
             let said = match i.launch.summary() {
-                Some(what) => format!("Saved: the next Play {what}."),
-                None => "Saved: nothing runs around the game.".to_string(),
+                Some(what) => trf("Saved: the next Play {what}.", &[("what", &what)]),
+                None => tr("Saved: nothing runs around the game.").to_string(),
             };
             self.reload_instances();
             said
@@ -82,8 +93,8 @@ impl Launcher {
             *on = !*on;
         });
         panel.saved = Some(saved.map(|i| match i.launch.summary() {
-            Some(what) => format!("Saved: the next Play {what}."),
-            None => "Saved: nothing runs around the game.".to_string(),
+            Some(what) => trf("Saved: the next Play {what}.", &[("what", &what)]),
+            None => tr("Saved: nothing runs around the game.").to_string(),
         }));
         self.reload_instances();
     }
@@ -137,8 +148,8 @@ impl Launcher {
                         on,
                         &t,
                     ))
-                    .child(text(theme::LABEL).text_color(t.ink_soft).child(label))
-                    .child(text(theme::CAPTION).text_color(t.muted).child(about))
+                    .child(text(theme::LABEL).text_color(t.ink_soft).child(tr(label)))
+                    .child(text(theme::CAPTION).text_color(t.muted).child(tr(about)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.flip(toggle);
                         cx.notify();
@@ -150,7 +161,7 @@ impl Launcher {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(caps("On this computer").text_color(t.muted))
+                .child(caps(tr("On this computer")).text_color(t.muted))
                 .child(list)
         })
     }
@@ -173,9 +184,9 @@ impl Launcher {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caps(label).text_color(t.muted))
-                .child(this.field(field, placeholder, 520., cx))
-                .child(text(theme::CAPTION).text_color(t.muted).child(about))
+                .child(caps(tr(label)).text_color(t.muted))
+                .child(this.field(field, tr(placeholder), 520., cx))
+                .child(text(theme::CAPTION).text_color(t.muted).child(tr(about)))
         };
         let pre = row(
             self,
@@ -199,7 +210,15 @@ impl Launcher {
             "Environment variables",
             Field::LaunchEnv,
             "For example NAME=value OTHER=\"two words\"",
-            "For the game and both commands above.",
+            "For the game and the commands; INST_NAME, INST_DIR and the other instance variables are set too.",
+        );
+        let post = row(
+            self,
+            cx,
+            "After the game",
+            Field::PostExit,
+            "For example ./backup.sh",
+            "A shell command, run in the instance's folder once the game has exited.",
         );
         let save = button("launch-save", "Save", Kind::Secondary, &t).on_click(cx.listener(
             |this, _: &ClickEvent, _, cx| {
@@ -219,10 +238,11 @@ impl Launcher {
                 .px(px(14.))
                 .py(px(12.))
                 .ml(px(40.))
-                .child(caps("When it starts").text_color(t.muted))
+                .child(caps(tr("When it starts")).text_color(t.muted))
                 .child(pre)
                 .child(wrapper)
                 .child(env)
+                .child(post)
                 .children(self.linux_switches(cx))
                 .child(
                     div()

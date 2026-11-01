@@ -1,4 +1,4 @@
-//! `ItemPickupParticle`: a taken item entity, experience orb or arrow flies
+//! `ItemPickupParticle`: a taken item entity, experience orb, arrow or trident flies
 //! into whoever took it over three ticks (`ClientPacketListener.handleTakeItemEntity`
 //! adds one for every `ClientboundTakeItemEntityPacket`), drawn with the render
 //! state it had when it was taken (`extractEntity(from, 1.0F)`).
@@ -16,6 +16,7 @@ pub(super) enum Taken {
     Item(Box<ItemEntity>),
     Orb(Box<ExperienceOrb>),
     Arrow(Box<Projectile>),
+    Trident(Box<super::trident::ThrownTrident>),
 }
 impl Taken {
     /// The render state's position: the entity's at partial tick 1.
@@ -24,6 +25,7 @@ impl Taken {
             Taken::Item(i) => i.position,
             Taken::Orb(o) => o.position,
             Taken::Arrow(a) => a.position,
+            Taken::Trident(t) => t.position,
         };
         [p.x, p.y, p.z]
     }
@@ -52,11 +54,16 @@ pub(super) struct Pickup {
 pub(super) struct Pickups {
     pub live: Vec<Pickup>,
     added: Vec<Pickup>,
+    /// The particles made so far, by kind of taken entity (for horizon-ctl).
+    made: std::collections::BTreeMap<&'static str, u64>,
 }
 impl Pickups {
     pub fn clear(&mut self) {
         self.live.clear();
         self.added.clear();
+    }
+    pub fn made(&self) -> &std::collections::BTreeMap<&'static str, u64> {
+        &self.made
     }
 }
 
@@ -113,6 +120,13 @@ impl Game<'_> {
         collector: Collector,
         target: [f64; 3],
     ) {
+        let kind = match taken {
+            Taken::Item(_) => "item",
+            Taken::Orb(_) => "orb",
+            Taken::Arrow(_) => "arrow",
+            Taken::Trident(_) => "trident",
+        };
+        *self.pickups.made.entry(kind).or_default() += 1;
         self.pickups.added.push(Pickup {
             taken,
             collector,
@@ -157,6 +171,7 @@ mod tests {
             on_ground: false,
             count: 1,
             ticks: 0,
+            health: 5,
         }))
     }
 

@@ -3,7 +3,8 @@
 Each group is a list of operations: `cmd` runs a command as the player and
 records its messages and results (`record: false` runs setup silently),
 `tick` advances the game, `settle` loads the terrain and entities around the
-player and `portal` sends the player through the nether portal it stands in.
+player, `portal` sends the player through the nether portal it stands in,
+and `falling` counts physical falling blocks by dimension, state and gravity.
 Everything happens high above the terrain (y 200 and up, where both worlds
 are air) after the world's entities are removed, so the results do not
 depend on world generation.
@@ -168,6 +169,7 @@ def player_state():
         cmd('/effect clear @s'),
         cmd('/give @s minecraft:diamond 3'),
         cmd('/give @s minecraft:diamond_sword[minecraft:custom_name="Blade"]'),
+        cmd('/give @s minecraft:diamond[item_name={text:"ItemName",color:"red"}]'),
         cmd('/give @s minecraft:stone 130'),
         cmd('/clear @s minecraft:diamond 0'),
         cmd('/clear @s minecraft:stone 0'),
@@ -349,6 +351,27 @@ def entities():
     ]
 
 
+def wither_spawn():
+    """A wither charging up (`Invul`) neither moves toward its target nor is hurt by
+    the blast that ends the charge (#3322): `WitherBoss.customServerAiStep` sets no
+    alternative target while invulnerable, and `ServerLevel.explode`'s entity query
+    skips the source."""
+    wither = '@e[type=minecraft:wither,limit=1]'
+    return [
+        *setup('/fill 0 209 4 9 209 20 minecraft:stone',
+               '/summon minecraft:pig 4.5 210 18.5 {NoAI:1b,Tags:["wither_prey"]}',
+               '/summon minecraft:wither 4.5 210 8.5 {Invul:20}'),
+        {'op': 'tick', 'n': 10},
+        cmd(f'/data get entity {wither} Pos'),
+        cmd(f'/data get entity {wither} Invul'),
+        {'op': 'tick', 'n': 12},
+        cmd(f'/data get entity {wither} Invul'),
+        cmd(f'/data get entity {wither} Health'),
+        *setup('/kill @e[type=minecraft:wither]', '/kill @e[tag=wither_prey]', '/fill 0 200 0 15 228 20 air'),
+        {'op': 'tick', 'n': 5},
+    ]
+
+
 def riding_teleport():
     """Player teleports remove the vehicle, leave it behind and keep the destination (#1473)."""
     horse = '@e[tag=tp_horse,limit=1]'
@@ -401,6 +424,32 @@ def mob_riding():
         cmd(f'/ride {rider} dismount'),
         cmd(f'/data get entity {rider} Pos'),
         *setup('/kill @e[tag=ride_r]', '/kill @e[tag=ride_v]'),
+    ]
+
+
+def camel_riders():
+    """A husk riding a camel (#3199): the camel and its rider never push each other
+    (Entity.push skips passengers of the same vehicle), so the camel stays near
+    where it was summoned instead of sliding off backwards, and it never sits down
+    with a controlling passenger (CamelAi.RandomSitting needs none)."""
+    camel = '@e[tag=camel_v,limit=1]'
+    return [
+        # A walled pen, and a camel that cannot walk: only a push would move it.
+        *setup('/fill 0 200 0 15 203 15 minecraft:glass hollow', '/fill 1 203 1 14 203 14 minecraft:air',
+               '/scoreboard objectives add camel_pose dummy',
+               '/summon minecraft:camel 8.0 201 8.0 {Tags:["camel_v"],'
+               'Passengers:[{id:"minecraft:husk",Tags:["camel_r"]}]}',
+               f'/attribute {camel} minecraft:movement_speed base set 0'),
+        {'op': 'tick', 'n': 100},
+        cmd('/execute as @e[tag=camel_r] on vehicle run say carrying'),
+        cmd('/execute if entity @e[tag=camel_v,x=8,y=201,z=8,distance=..4]'),
+        {'op': 'tick', 'n': 500},
+        *setup(f'/execute store result score camel camel_pose run data get entity {camel} LastPoseTick'),
+        # Negative while sitting.
+        cmd('/execute if score camel camel_pose matches ..-1'),
+        cmd('/execute as @e[tag=camel_r] on vehicle run say still carrying'),
+        *setup('/kill @e[tag=camel_r]', '/kill @e[tag=camel_v]', '/scoreboard objectives remove camel_pose',
+               '/fill 0 200 0 15 203 15 minecraft:air'),
     ]
 
 
@@ -463,7 +512,40 @@ def execute():
         cmd('/execute positioned 4 210 4 if block ~ ~ ~ minecraft:stone'),
         cmd('/execute positioned as @s run tp @s ~ ~ ~'),
         cmd('/execute align xyz run summon minecraft:armor_stand ~ ~-20 ~ {NoGravity:1b,Tags:["ex"],UUID:[I;1,2,3,4]}'),
+        cmd('/summon minecraft:armor_stand 3 210 3 {NoGravity:1b,Tags:["implicit_tp"]}'),
+        cmd('/execute as @e[tag=implicit_tp,limit=1] run tp 4 210 4'),
+        cmd('/data get entity @e[tag=implicit_tp,limit=1] Pos'),
+        cmd('/kill @e[tag=implicit_tp]'),
         cmd('/execute if entity @e[tag=ex]'),
+        # A UUID names any entity (ServerLevel.getEntity), not only mobs (#4966).
+        cmd('/execute if entity 00000001-0000-0002-0000-000300000004'),
+        cmd('/data get entity 00000001-0000-0002-0000-000300000004 Tags'),
+        cmd('/summon minecraft:item_display 2.5 210 2.5 {UUID:[I;5,6,7,8],Tags:["uuid_display"]}'),
+        cmd('/data get entity 00000005-0000-0006-0000-000700000008 Tags'),
+        cmd('/tp 00000005-0000-0006-0000-000700000008 2.5 215 2.5'),
+        cmd('/data get entity 00000005-0000-0006-0000-000700000008 Pos'),
+        cmd('/kill 00000005-0000-0006-0000-000700000008'),
+        # The killed id stays in the UUID map. A re-summon of that UUID must
+        # still resolve to the entity the level holds.
+        cmd('/summon minecraft:item_display 2.5 210 2.5 {UUID:[I;5,6,7,8],Tags:["uuid_display_2"]}'),
+        cmd('/data get entity 00000005-0000-0006-0000-000700000008 Tags'),
+        cmd('/kill 00000005-0000-0006-0000-000700000008'),
+        cmd('/summon minecraft:marker 2.5 210 8.5 {UUID:[I;13,14,15,16],Tags:["uuid_marker"]}'),
+        cmd('/execute as 0000000d-0000-000e-0000-000f00000010 run data get entity @s Tags'),
+        cmd('/kill 0000000d-0000-000e-0000-000f00000010'),
+        cmd('/data get entity 00000015-0000-0016-0000-001700000018'),
+        cmd('/summon minecraft:pig 2.5 210 6.5 {NoAI:1b,NoGravity:1b,UUID:[I;9,10,11,12]}'),
+        cmd('/kill 00000009-0000-000a-0000-000b0000000c'),
+        # OwnableEntity.getOwner → EntityReference.getLivingEntity: an armor
+        # stand is an owner, a marker is not.
+        cmd('/summon minecraft:wolf 2.5 210 14.5 {NoAI:1b,NoGravity:1b,Sitting:1b,Tags:["uuid_pet"],Owner:[I;1,2,3,4]}'),
+        cmd('/execute as @e[tag=uuid_pet,limit=1] on owner run data get entity @s Tags'),
+        cmd('/summon minecraft:marker 4.5 210 14.5 {UUID:[I;17,18,19,20]}'),
+        cmd('/summon minecraft:wolf 6.5 210 14.5 {NoAI:1b,NoGravity:1b,Sitting:1b,Tags:["uuid_pet_marker"],Owner:[I;17,18,19,20]}'),
+        cmd('/execute as @e[tag=uuid_pet_marker,limit=1] on owner run say reached'),
+        cmd('/kill @e[tag=uuid_pet]'),
+        cmd('/kill @e[tag=uuid_pet_marker]'),
+        cmd('/kill 00000011-0000-0012-0000-001300000014'),
         cmd('/execute as @e[tag=ex] run data get entity @s Pos'),
         cmd('/data get entity @e[tag=ex,limit=1]'),
         cmd('/data get entity @e[tag=ex,limit=1] Pose'),
@@ -576,6 +658,46 @@ def levels():
     ]
 
 
+def end_portal_entities():
+    """Non-player exit travel with two ticking levels, and a falling block
+    crossing the portal's inside shape on the tick it reaches the floor."""
+    end = '/execute in minecraft:the_end run'
+    local = 'distance=..1000000'
+    return [
+        *setup('/forceload add 0 0', '/setblock 8 229 8 minecraft:stone', '/setworldspawn 8 230 8',
+               f'{end} tp @s 8.5 230 8.5'),
+        {'op': 'settle'},
+        *setup(f'{end} forceload add 0 0',
+               f'{end} fill 2 209 2 6 209 6 minecraft:stone',
+               f'{end} fill 2 210 2 6 215 6 minecraft:air',
+               f'{end} setblock 4 210 4 minecraft:end_portal',
+               f'{end} summon minecraft:pig 4.5 210.5 4.5 {{NoAI:1b,NoGravity:1b,Tags:["end_portal_mob"]}}'),
+        {'op': 'tick', 'n': 10},
+        cmd(f'{end} execute if entity @e[tag=end_portal_mob,{local}]'),
+        cmd(f'/execute in minecraft:overworld if entity @e[tag=end_portal_mob,{local}]'),
+        *setup(f'{end} summon minecraft:falling_block 4.5 213 4.5 {{BlockState:{{id:"minecraft:sand"}},Time:1,Motion:[0.0d,-2.0d,0.0d],Tags:["end_portal_falling"]}}'),
+        {'op': 'tick', 'n': 10},
+        cmd('/execute in minecraft:overworld if block 8 230 8 minecraft:sand'),
+        cmd(f'{end} execute if block 4 210 4 minecraft:end_portal'),
+        *setup('/execute in minecraft:overworld run setblock 8 230 8 minecraft:air',
+               f'{end} summon minecraft:falling_block 4.5 210.5 4.5 {{BlockState:{{id:"minecraft:gravel"}},Time:1,NoGravity:1b,Tags:["end_portal_float"]}}'),
+        {'op': 'tick', 'n': 5},
+        {'op': 'falling', 'dimension': 'minecraft:the_end', 'block': 'minecraft:gravel', 'no_gravity': True},
+        {'op': 'falling', 'dimension': 'minecraft:overworld', 'block': 'minecraft:gravel', 'no_gravity': True, 'discard': True},
+        # FallingBlock.isFree(end_portal) is false: a placed egg above it
+        # stays a block in vanilla, despite the portal's empty collision shape.
+        *setup(f'{end} setblock 4 211 4 minecraft:dragon_egg'),
+        {'op': 'tick', 'n': 5},
+        cmd(f'{end} execute if block 4 211 4 minecraft:dragon_egg'),
+        *setup('/kill @e[tag=end_portal_mob]',
+               f'{end} fill 2 209 2 6 215 6 minecraft:air',
+               f'{end} forceload remove 0 0',
+               '/execute in minecraft:overworld run fill 8 229 8 8 231 8 minecraft:air',
+               '/execute in minecraft:overworld run tp @s 8.5 230 8.5'),
+        {'op': 'settle'},
+    ]
+
+
 def items_and_loot():
     return [
         *setup('/clear @s', '/gamemode survival'),
@@ -643,6 +765,20 @@ def items_and_loot():
         cmd('/clear @s #minecraft:logs'),
         cmd('/clear @s *[minecraft:custom_data]'),
         cmd('/clear @s'),
+        # A chest or hopper minecart's slots (ContainerEntity.getChestVehicleSlot): container.N below its size.
+        *setup('/summon minecraft:chest_minecart 4.5 210 4.5 {NoGravity:1b,Tags:["c"]}',
+               '/summon minecraft:hopper_minecart 6.5 210 4.5 {NoGravity:1b,Tags:["h"]}'),
+        cmd('/item replace entity @e[tag=c,limit=1] container.0 with minecraft:diamond 3'),
+        cmd('/item replace entity @e[tag=c,limit=1] container.26 with minecraft:emerald 2'),
+        cmd('/item replace entity @e[tag=c,limit=1] container.27 with minecraft:emerald 2'),
+        cmd('/item replace entity @e[tag=h,limit=1] container.4 with minecraft:gold_ingot 5'),
+        cmd('/item replace entity @e[tag=h,limit=1] container.5 with minecraft:gold_ingot 5'),
+        cmd('/item modify entity @e[tag=c,limit=1] container.0 {type:"minecraft:set_count",count:2}'),
+        cmd('/item replace entity @s hotbar.0 from entity @e[tag=c,limit=1] container.26'),
+        cmd('/data get entity @e[tag=c,limit=1] Items'),
+        cmd('/execute if items entity @e[tag=h,limit=1] container.* minecraft:gold_ingot'),
+        cmd('/clear @s'),
+        *setup('/kill @e[tag=c]', '/kill @e[tag=h]'),
         *setup('/setblock 3 206 3 minecraft:air', '/setblock 2 205 2 minecraft:air', '/kill @e[type=minecraft:item]', '/gamemode creative'),
     ]
 
@@ -1066,8 +1202,9 @@ def social():
 
 
 def test_command():
-    # Horizon has no game test runner: `/test run|runmultiple|verify` of an
-    # existing instance and `/test create` are not compared.
+    # `/test run|runmultiple` of an existing instance start a real test (a
+    # tick-based run, not compared here); `verify`, `create`, `locate` and
+    # `pos` with test instance blocks around are not ported.
     return [
         cmd('/test clearall'),
         cmd('/test stop'),
@@ -1113,6 +1250,193 @@ def server_clock():
     ]
 
 
+def wither_breaks():
+    """WitherBoss.customServerAiStep 20 ticks after it is hurt: Level.destroyBlock around it, which leaves
+    each cell's fluid (FluidState.createLegacyBlock), so water stays and a waterlogged block turns to water."""
+    return [
+        *setup('/fill 4 206 4 12 217 12 minecraft:glass hollow', '/fill 5 207 5 11 216 11 minecraft:water',
+               '/setblock 7 210 7 minecraft:stone', '/setblock 9 211 9 minecraft:oak_stairs[waterlogged=true]',
+               '/setblock 7 212 9 minecraft:oak_slab[waterlogged=false]'),
+        {'op': 'tick', 'n': 10},
+        *setup('/summon minecraft:wither 8.5 210 8.5 {NoGravity:1b,Tags:["wb"]}'),
+        cmd('/damage @e[tag=wb,limit=1] 1'),
+        # WaterAvoidingRandomFlyingGoal may set off on a stroll (the wither's random is unseeded in vanilla),
+        # which moves the box destroyBlocksTick breaks. Hold it in place each tick until then: customServerAiStep
+        # runs before travel, so the break sees the teleported position.
+        *[op for _ in range(25) for op in (*setup('/tp @e[tag=wb] 8.5 210 8.5'), {'op': 'tick', 'n': 1})],
+        {'op': 'tick', 'n': 15},
+        cmd('/execute if block 8 212 8 minecraft:water'),
+        cmd('/execute if block 9 211 9 minecraft:water'),
+        cmd('/execute if block 9 211 9 minecraft:oak_stairs'),
+        cmd('/execute if block 7 210 7 minecraft:stone'),
+        cmd('/execute if block 7 212 9 minecraft:oak_slab'),
+        # The broken cells' neighbours were updated (setBlock flag 3): the pool flows back in.
+        cmd('/execute if block 7 210 7 minecraft:water'),
+        cmd('/execute if block 7 212 9 minecraft:water'),
+        cmd('/execute if block 6 210 6 minecraft:water'),
+        *setup('/kill @e[tag=wb]', '/fill 4 206 4 12 217 12 minecraft:air'),
+        {'op': 'tick', 'n': 25},
+    ]
+
+
+def tnt_minecart_rails():
+    """A primed TNT minecart (MinecartTNT.isPrimed) on a powered activator rail inside an obsidian box: its
+    blast neither resists on nor breaks a rail or the block under one (getBlockExplosionResistance and
+    shouldBlockExplode, #4992), but breaks the stone beside them; the obsidian holds."""
+    return [
+        *setup('/fill 3 203 3 7 207 7 minecraft:obsidian', '/fill 4 204 4 6 206 6 minecraft:air',
+               '/setblock 5 204 5 minecraft:redstone_block', '/setblock 5 205 5 minecraft:activator_rail',
+               '/setblock 4 204 5 minecraft:stone', '/setblock 2 205 5 minecraft:stone'),
+        cmd('/summon minecraft:tnt_minecart 5.5 205.0625 5.5'),
+        {'op': 'tick', 'n': 5},
+        cmd('/execute if entity @e[type=minecraft:tnt_minecart]'),
+        {'op': 'tick', 'n': 100},
+        cmd('/execute if entity @e[type=minecraft:tnt_minecart]'),
+        cmd('/execute if block 5 205 5 minecraft:activator_rail'),
+        cmd('/execute if block 5 204 5 minecraft:redstone_block'),
+        cmd('/execute if block 4 204 5 minecraft:stone'),
+        cmd('/execute if block 3 205 5 minecraft:obsidian'),
+        cmd('/execute if block 2 205 5 minecraft:stone'),
+        *setup('/kill @e[type=!player]', '/fill 2 203 3 7 207 7 minecraft:air'),
+        {'op': 'tick', 'n': 5},
+    ]
+
+
+def ender_dragon():
+    """`/kill` on the fight's dragon ends the fight (#3319): `EnderDragon.kill` removes it and calls
+    `EnderDragonFight.setDragonKilled`, so no new dragon takes its place, the exit portal opens and the
+    first dragon leaves its egg. The player stays over the exit portal, in the fight (`validPlayer`)."""
+    end = '/execute in minecraft:the_end run'
+    return [
+        *setup('/gamemode creative', f'{end} tp @s 0.5 100 0.5 0 0'),
+        {'op': 'settle'},
+        # updatePlayers, the arena scan and createNewDragon once the 17 by 17 arena chunks are block ticking
+        # (EnderDragonFight.isArenaLoaded). The oracle generates them on worker threads: a tick op with a
+        # `record` key gives it a moment of wall time before its ticks.
+        *[{'op': 'tick', 'n': 20, 'record': False}] * 10,
+        cmd('/execute if entity @e[type=minecraft:ender_dragon]'),
+        cmd('/kill @e[type=minecraft:ender_dragon]'),
+        {'op': 'tick', 'n': 40},
+        cmd('/execute if entity @e[type=minecraft:ender_dragon]'),
+        cmd(f'{end} fill -3 0 -3 3 120 3 minecraft:air replace minecraft:end_portal'),
+        cmd(f'{end} fill -3 0 -3 3 120 3 minecraft:air replace minecraft:dragon_egg'),
+        *setup('/execute in minecraft:overworld run tp @s 8.5 230 8.5 0 0'),
+        {'op': 'settle'},
+    ]
+
+
+def place_structure():
+    """`/place structure` (PlaceCommand.placeStructure): the id is resolved, a
+    `StructureStart` is generated for the position's chunk with vanilla's
+    `biome -> true` predicate, and its `placeInChunk` runs for every chunk of the
+    start's box in the live level. Buried treasure's one piece digs down from the
+    ocean floor and leaves a single chest, so a chest count in its chunk compares
+    the generated start and its placement without knowing the terrain height."""
+    return [
+        *setup('/gamemode creative', '/tp @s 8.5 230 8.5 0 0'),
+        {'op': 'settle'},
+        *setup('/kill @e[type=!minecraft:player]',
+               '/fill 0 0 0 15 120 15 minecraft:air replace minecraft:chest'),
+        cmd('/place structure minecraft:buried_treasure 4 210 4'),
+        # One chest between y 0 and 120 of chunk (0, 0): the piece's column is
+        # inside that chunk whatever height its dig reached.
+        cmd('/fill 0 0 0 15 120 15 minecraft:air replace minecraft:chest'),
+    ]
+
+
+def tame_wolf_kills():
+    # LivingEntity.resolvePlayerResponsibleForDamage: a tame wolf's hit is its
+    # owner's (the harness player, OfflinePlayer:Player), so the kill drops
+    # experience and ServerPlayer.awardKillScore counts it (mob_kills,
+    # totalKillCount); the killed statistic stays the wolf's
+    # (Player.killedEntity). A wild wolf's kill is nobody's.
+    owner = '[I;-1608632253,-450807400,-1786055591,-2146546415]'
+    return [
+        *setup('/gamerule mob_drops true', '/scoreboard objectives add wolf_kills minecraft.killed:minecraft.zombie',
+               '/scoreboard objectives add wolf_mob_kills minecraft.custom:minecraft.mob_kills',
+               '/scoreboard objectives add wolf_total totalKillCount'),
+        cmd('/summon minecraft:wolf 4.5 210 4.5 {NoAI:1b,NoGravity:1b,Tags:["wild"]}'),
+        cmd('/summon minecraft:zombie 6.5 210 4.5 {NoAI:1b,NoGravity:1b,Tags:["prey"]}'),
+        cmd('/damage @e[tag=prey,limit=1] 100 minecraft:mob_attack by @e[tag=wild,limit=1]'),
+        {'op': 'tick', 'n': 25},
+        cmd('/execute if entity @e[type=minecraft:experience_orb,limit=1]'),
+        cmd('/scoreboard players get @s wolf_kills'),
+        cmd('/scoreboard players get @s wolf_mob_kills'),
+        cmd('/scoreboard players get @s wolf_total'),
+        cmd(f'/summon minecraft:wolf 4.5 210 8.5 {{NoAI:1b,NoGravity:1b,Owner:{owner},Tags:["pet"]}}'),
+        cmd('/summon minecraft:zombie 6.5 210 8.5 {NoAI:1b,NoGravity:1b,Tags:["prey"]}'),
+        cmd('/damage @e[tag=prey,limit=1] 100 minecraft:mob_attack by @e[tag=pet,limit=1]'),
+        {'op': 'tick', 'n': 25},
+        cmd('/execute if entity @e[type=minecraft:experience_orb,limit=1]'),
+        cmd('/scoreboard players get @s wolf_kills'),
+        cmd('/scoreboard players get @s wolf_mob_kills'),
+        cmd('/scoreboard players get @s wolf_total'),
+        *setup('/kill @e[type=!player]', '/scoreboard objectives remove wolf_kills',
+               '/scoreboard objectives remove wolf_mob_kills', '/scoreboard objectives remove wolf_total',
+               '/gamerule mob_drops false'),
+    ]
+
+
+def experience_orb_fall():
+    """`ExperienceOrb.tick`'s fall and landing (the dragon-death XP rain, #4781):
+    gravity 0.03 (skipped while the orb is inside blocks), one drag of
+    `getAirDrag()` times the ground's friction scaled over every axis, and a
+    landing bounce of `-fallSpeed * 0.4` gated on `fallSpeed < -getGravity()` —
+    not a fixed restitution. The orb spawns 16 blocks from the player, out of
+    the 8 block follow radius, 45 blocks above a stone platform; the track
+    draws no random, so both games compare to the digit."""
+    return [
+        *setup('/fill 20 214 20 28 214 28 minecraft:stone'),
+        cmd('/summon minecraft:experience_orb 24.5 260 24.5 {Value:1s}'),
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Pos'),
+        {'op': 'tick', 'n': 1},
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Pos'),
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Motion'),
+        {'op': 'tick', 'n': 64},
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Pos'),
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Motion'),
+        {'op': 'tick', 'n': 20},
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Pos'),
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Motion'),
+        {'op': 'tick', 'n': 35},
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Pos'),
+        cmd('/data get entity @e[type=minecraft:experience_orb,limit=1] Motion'),
+        *setup('/kill @e[type=minecraft:experience_orb]', '/fill 20 214 20 28 214 28 minecraft:air'),
+        {'op': 'tick', 'n': 5},
+    ]
+
+
+def creative_shulker_drops():
+    """ShulkerBoxBlock.playerWillDestroy: Creative keeps a filled box as one item,
+    even with block_drops off. Empty boxes and survival use the ordinary drop rules."""
+    colors = ('white orange magenta light_blue yellow lime pink gray light_gray cyan '
+              'purple blue brown green red black').split()
+    blocks = ['shulker_box', *(f'{color}_shulker_box' for color in colors)]
+    item = '@e[type=minecraft:item,limit=1]'
+    contents = ('Items:[{Slot:0b,id:"minecraft:diamond_sword",count:1,components:{'
+                '"minecraft:custom_name":"Blade","minecraft:enchantments":{"minecraft:sharpness":5}}},'
+                '{Slot:26b,id:"minecraft:apple",count:16}],')
+    out = []
+    for block in blocks:
+        for mode, filled, drops in [('creative', True, True), ('creative', False, True),
+                                    ('creative', True, False), ('survival', True, True),
+                                    ('survival', False, True), ('survival', True, False)]:
+            out += setup('/kill @e[type=minecraft:item]', f'/gamemode {mode}',
+                         f'/gamerule block_drops {str(drops).lower()}',
+                         f'/setblock 4 210 4 minecraft:{block}'
+                         '{' + (contents if filled else '') + 'TestOnly:7}')
+            out += [{'op': 'break', 'pos': [4, 210, 4]},
+                    cmd('/execute if block 4 210 4 minecraft:air'),
+                    cmd('/execute if entity @e[type=minecraft:item]')]
+            if (mode == 'creative' and filled) or (mode == 'survival' and drops):
+                out += [cmd(f'/data get entity {item} Item'),
+                        cmd(f'/execute if data entity {item} Item.components."minecraft:block_entity_data"')]
+                if mode == 'creative':
+                    out += [cmd(f'/data get entity {item} Pos'), cmd(f'/data get entity {item} PickupDelay')]
+    out += setup('/kill @e[type=minecraft:item]', '/gamemode creative', '/gamerule block_drops true')
+    return out
+
+
 def groups():
     return [
         ('setup', group_setup()),
@@ -1122,11 +1446,14 @@ def groups():
         ('player state', player_state()),
         ('blocks and border', world_blocks()),
         ('entities', entities()),
+        ('wither spawn', wither_spawn()),
         ('riding teleport', riding_teleport()),
         ('mob riding', mob_riding()),
+        ('camel riders', camel_riders()),
         ('scores, teams and bossbars', scores()),
         ('execute', execute()),
         ('levels', levels()),
+        ('end portal entities', end_portal_entities()),
         ('items and loot', items_and_loot()),
         ('world', world_misc()),
         ('progression', progression()),
@@ -1135,4 +1462,11 @@ def groups():
         ('compute', compute()),
         ('social and scoreboard', social()),
         ('test', test_command()),
+        ('wither breaks', wither_breaks()),
+        ('tnt minecart rails', tnt_minecart_rails()),
+        ('creative shulker drops', creative_shulker_drops()),
+        ('ender dragon', ender_dragon()),
+        ('place structure', place_structure()),
+        ('tame wolf kills', tame_wolf_kills()),
+        ('experience orb fall', experience_orb_fall()),
     ]

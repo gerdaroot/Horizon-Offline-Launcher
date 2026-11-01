@@ -9,6 +9,7 @@ use crate::{
     items::{ItemStack, Items},
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_world::loot::PackOverlay;
 use serde_json::Value;
 use std::{fs, path::Path, sync::Arc};
 
@@ -24,14 +25,14 @@ pub struct StationData {
     pub recipe_index: crate::recipe_book::RecipeIndex,
 }
 impl StationData {
-    pub fn load(root: &Path, items: &Items) -> Self {
+    pub fn load(root: &Path, items: &Items, overlay: &PackOverlay) -> Self {
         Self {
             enchantments: std::sync::Arc::clone(&items.enchantments),
-            recipes: StationRecipes::load(root, items),
-            brewing: crate::brewing::Brewing::load(root, items),
-            trades: crate::merchant::Trades::load(root),
+            recipes: StationRecipes::load(root, items, overlay),
+            brewing: crate::brewing::Brewing::load(root, items, overlay),
+            trades: crate::merchant::Trades::load(root, overlay),
             banners: crate::banner::Banners::load(root),
-            recipe_index: crate::recipe_book::RecipeIndex::load(root),
+            recipe_index: crate::recipe_book::RecipeIndex::load(root, overlay),
         }
     }
 }
@@ -179,7 +180,6 @@ pub fn increased_repair_cost(cost: u32) -> u32 {
 pub fn hover_name(names: &dyn Fn(&str) -> String, stack: &ItemStack) -> String {
     stack
         .custom_name()
-        .map(str::to_owned)
         .or_else(|| stack.item_name())
         .unwrap_or_else(|| names(&stack.item))
 }
@@ -288,7 +288,7 @@ pub fn anvil_result(
             if n != hover_name {
                 naming_cost = 1;
                 price += 1;
-                result.data_mut().custom_name = Some(n.to_owned());
+                result.data_mut().custom_name = Some(horizon_world::nbt::Tag::String(n.into()));
             }
         }
         _ => {
@@ -481,63 +481,66 @@ pub struct StationRecipes {
     pub trim_materials: Vec<(String, String)>,
 }
 fn ingredient(v: &Value, items: &Items) -> Ingredient {
-    let mut list: Vec<String> = Vec::new();
-    for s in match v {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(str::to_owned))
-            .collect(),
-        _ => vec![],
-    } {
-        let more = match s.strip_prefix('#') {
-            Some(tag) => items.item_tag_order.get(tag).cloned().unwrap_or_default(),
-            None => vec![s],
-        };
-        for i in more {
-            if !list.contains(&i) {
-                list.push(i);
-            }
-        }
-    }
-    Ingredient::of(list)
+    Ingredient::parse(v, items).unwrap_or_else(|| Ingredient::of(Vec::new()))
 }
 impl StationRecipes {
-    pub fn load(root: &Path, items: &Items) -> Self {
+    pub fn load(root: &Path, items: &Items, overlay: &PackOverlay) -> Self {
         // Vanilla's recipes, then the content mods' (docs/modpacks.md).
         let mut files = Vec::new();
         let namespaces =
             std::iter::once("minecraft".to_owned()).chain(crate::mod_content::namespaces(root));
+        // NeoForge's load conditions: a file whose don't hold is silently
+        // absent (`mod_loaded` asks which mods' data is in this root).
+        let mods: Vec<String> = {
+            let mut mods = horizon_items::content_namespaces::mod_ids(root);
+            if !mods.iter().any(|m| m == "minecraft") {
+                mods.push("minecraft".to_owned());
+            }
+            mods
+        };
+        let conditions_hold = |v: &Value| {
+            horizon_world::conditions::conditions_hold(v, &|id: &str| mods.iter().any(|m| m == id))
+        };
         for namespace in namespaces {
-            let mut more: Vec<_> = fs::read_dir(root.join(format!("data/{namespace}/recipe")))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "json"))
-                .collect();
-            more.sort();
-            files.extend(more.into_iter().map(|p| (namespace.clone(), p)));
+            let dir = root.join(format!("data/{namespace}/recipe"));
+            let more = crate::crafting::recipe_files(&dir).unwrap_or_default();
+            files.extend(
+                more.into_iter()
+                    .map(|(name, p)| (namespace.clone(), name, p)),
+            );
         }
-        let mut smithing = Vec::new();
-        let mut stonecutting = Vec::new();
-        for (namespace, p) in files {
-            let Ok(bytes) = fs::read(&p) else { continue };
-            let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        let mut sources: Vec<(String, Value)> = files
+            .iter()
+            .filter_map(|(namespace, name, p)| {
+                let bytes = fs::read(p).ok()?;
+                let v = serde_json::from_slice::<Value>(&bytes).ok()?;
+                Some((format!("{namespace}:{name}"), v))
+            })
+            .collect();
+        // The world's packs' recipes over the game's own: the top pack's
+        // file for each id replaces it (`SimpleJsonResourceReloadListener`).
+        // The gate answers the merged file, as the crafting loader's does:
+        // a false-conditioned pack file leaves the lower one gone too.
+        for (id, files) in overlay.kind("recipe") {
+            let Ok(v) = serde_json::from_slice::<Value>(PackOverlay::top(files)) else {
                 continue;
             };
-            let id = format!(
-                "{namespace}:{}",
-                p.file_stem().and_then(|s| s.to_str()).unwrap_or("")
-            );
+            match sources.iter_mut().find(|(n, _)| n == id) {
+                Some(slot) => slot.1 = v,
+                None => sources.push((id.to_owned(), v)),
+            }
+        }
+        sources.retain(|(_, v)| conditions_hold(v));
+        let mut smithing = Vec::new();
+        let mut stonecutting = Vec::new();
+        for (id, v) in sources {
             match v["type"].as_str().unwrap_or("") {
                 "minecraft:smithing_transform" => smithing.push(Smithing::Transform {
                     id,
                     template: ingredient(&v["template"], items),
                     base: ingredient(&v["base"], items),
                     addition: ingredient(&v["addition"], items),
-                    result: v["result"]["id"]
-                        .as_str()
+                    result: horizon_world::loot::recipe_result_id(&v["result"])
                         .unwrap_or("minecraft:air")
                         .to_owned(),
                 }),
@@ -548,14 +551,20 @@ impl StationRecipes {
                     addition: ingredient(&v["addition"], items),
                     pattern: v["pattern"].as_str().unwrap_or("").to_owned(),
                 }),
-                "minecraft:stonecutting" => stonecutting.push(Stonecutting {
-                    id,
-                    input: ingredient(&v["ingredient"], items),
-                    result: ItemStack::new(
-                        v["result"]["id"].as_str().unwrap_or("minecraft:air"),
-                        v["result"]["count"].as_u64().unwrap_or(1) as u32,
-                    ),
-                }),
+                "minecraft:stonecutting" => {
+                    // A result count outside 1..=99 fails vanilla's codec: no recipe.
+                    if let Some(count) = crate::crafting::template_count(&v["result"]) {
+                        stonecutting.push(Stonecutting {
+                            id,
+                            input: ingredient(&v["ingredient"], items),
+                            result: ItemStack::new(
+                                horizon_world::loot::recipe_result_id(&v["result"])
+                                    .unwrap_or("minecraft:air"),
+                                count,
+                            ),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -628,22 +637,34 @@ impl StationRecipes {
         base: Option<&ItemStack>,
         addition: Option<&ItemStack>,
     ) -> Option<ItemStack> {
+        self.smithing_recipe(e, template, base, addition)
+            .map(|(_, result)| result)
+    }
+    /// `SmithingMenu.createResult` with the id of the recipe that made the result.
+    pub fn smithing_recipe(
+        &self,
+        e: &Enchantments,
+        template: Option<&ItemStack>,
+        base: Option<&ItemStack>,
+        addition: Option<&ItemStack>,
+    ) -> Option<(&str, ItemStack)> {
         let (template, base, addition) = (template?, base?, addition?);
         for r in &self.smithing {
             match r {
                 Smithing::Transform {
+                    id,
                     template: t,
                     base: b,
                     addition: a,
                     result,
-                    ..
                 } => {
                     if t.test(template) && b.test(base) && a.test(addition) {
                         // SmithingTransformRecipe: transmute the base keeping its components.
-                        return Some(base.transmute(result, 1));
+                        return Some((id.as_str(), base.transmute(result, 1)));
                     }
                 }
                 Smithing::Trim {
+                    id,
                     template: t,
                     base: b,
                     addition: a,
@@ -651,7 +672,7 @@ impl StationRecipes {
                     ..
                 } => {
                     if t.test(template) && b.test(base) && a.test(addition) {
-                        return apply_trim(e, base, addition, pattern);
+                        return apply_trim(e, base, addition, pattern).map(|r| (id.as_str(), r));
                     }
                 }
             }
@@ -842,7 +863,7 @@ mod tests {
         assert_eq!(r.cost, 8);
         assert!(r.only_renaming);
         let out = r.result.unwrap();
-        assert_eq!(out.custom_name(), Some("Excalibur"));
+        assert_eq!(out.custom_name().as_deref(), Some("Excalibur"));
         // Renaming alone does not raise the penalty.
         assert_eq!(out.repair_cost(), 7);
         // Same name: nothing to do.
@@ -908,8 +929,8 @@ mod tests {
         if !root.join("items.json").exists() {
             return;
         }
-        let items = Items::tags_only(&root).unwrap();
-        let data = StationData::load(&root, &items);
+        let items = Items::tags_only(&root, &PackOverlay::NONE).unwrap();
+        let data = StationData::load(&root, &items, &PackOverlay::NONE);
         let e = &data.enchantments;
         assert_eq!(e.list.len(), 43);
         assert_eq!(
@@ -1001,5 +1022,19 @@ mod tests {
         // min cost of Sharpness III = 23; ceil(23/2)=12 -> 12..23.
         let xp = grindstone_experience(&e, &mut r, Some(&s), None);
         assert!((12..24).contains(&xp));
+    }
+    #[test]
+    fn smithing_ingredient_parses_holders() {
+        let items = sample_items();
+        let a = ingredient(&serde_json::json!("minecraft:diamond_sword"), &items);
+        assert_eq!(a.1, vec!["minecraft:diamond_sword"]);
+        let b = ingredient(
+            &serde_json::json!(["minecraft:diamond_sword", "minecraft:diamond_axe"]),
+            &items,
+        );
+        assert_eq!(
+            b.1,
+            vec!["minecraft:diamond_sword", "minecraft:diamond_axe"]
+        );
     }
 }

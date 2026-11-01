@@ -8,6 +8,8 @@
 //! in index order, and the value that did not fit is added last. Palettes
 //! never shrink while resident; `pack` writes the canonical saved form.
 
+use crate::storage::{locate, mask};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// `Strategy.createForBlockStates`: 4096 entries, linear palettes up to 4
@@ -106,20 +108,6 @@ enum Palette {
     List(Vec<u32>),
     Global,
 }
-/// `n / per_word` for `n < 4096` by multiplication: `MAGIC[bits].0 = ceil(2^20 /
-/// (64 / bits))` is exact while `n * (64 / bits) < 2^20`. `.1` is the bits a
-/// word's entries fill (`64 / bits * bits`): looked up, not divided for, as a
-/// division by a run-time value costs tens of cycles on x86.
-const MAGIC: [(u32, u32); 33] = {
-    let mut table = [(0, 0); 33];
-    let mut bits = 1;
-    while bits <= 32 {
-        let per = 64 / bits as u32;
-        table[bits] = ((1u32 << 20).div_ceil(per), per * bits as u32);
-        bits += 1;
-    }
-    table
-};
 /// Words of `bits`-wide values: `entries.div_ceil(64 / bits)`.
 pub fn storage_len(bits: u8, entries: usize) -> usize {
     if bits == 0 {
@@ -127,23 +115,6 @@ pub fn storage_len(bits: u8, entries: usize) -> usize {
     } else {
         entries.div_ceil(64 / usize::from(bits))
     }
-}
-#[inline]
-fn locate(bits: u8, i: usize) -> (usize, u32) {
-    if bits.is_power_of_two() {
-        // 64 / bits is a power of two: shifts instead of the multiplication.
-        let log = bits.trailing_zeros();
-        let word = i >> (6 - log);
-        (word, ((i & ((64 >> log) - 1)) as u32) << log)
-    } else {
-        let (magic, filled) = MAGIC[usize::from(bits)];
-        let word = (i as u32 * magic) >> 20;
-        (word as usize, i as u32 * u32::from(bits) - word * filled)
-    }
-}
-#[inline]
-fn mask(bits: u8) -> u64 {
-    (1u64 << bits) - 1
 }
 fn read(words: &[u64], bits: u8, i: usize) -> u32 {
     let (word, shift) = locate(bits, i);
@@ -467,6 +438,25 @@ impl PalettedContainer {
                 }
             }
         }
+    }
+    /// The palette id of every entry in index order, and the list palette
+    /// they index (`get(i)` is `list[ids[i]]`), without looking the values
+    /// up; `None` (and `ids` untouched) for a single-value or global palette.
+    pub fn unpack_ids(&self, ids: &mut [u16]) -> Option<&[u32]> {
+        let Palette::List(list) = &self.palette else {
+            return None;
+        };
+        assert_eq!(ids.len(), self.strategy.entries());
+        let bits = usize::from(self.bits);
+        let per = 64 / bits;
+        let m = mask(self.bits);
+        for (chunk, &word) in ids.chunks_mut(per).zip(&self.words) {
+            for (slot, cell) in chunk.iter_mut().enumerate() {
+                // List palettes stay at a few bits (eight at most for blocks).
+                *cell = ((word >> (slot * bits)) & m) as u16;
+            }
+        }
+        Some(list)
     }
     /// A container holding `values` in the smallest configuration for their
     /// distinct count, with palette ids in first-occurrence order, like a

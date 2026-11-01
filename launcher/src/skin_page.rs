@@ -62,7 +62,7 @@ impl Launcher {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose".into()),
+            prompt: Some(tr("Choose").into()),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut paths))) = paths.await else {
@@ -234,10 +234,10 @@ impl Launcher {
                         }))
                         .child(text(theme::CAPTION).text_color(t.muted).child(tr(
                             "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the \
-                             launcher and given to the game when this name plays. You see the \
-                             skin on yourself in single player and on servers that send no skin \
-                             of their own; other players see it only where the server shows \
-                             skins for names (SkinsRestorer: /skin). Capes aren't drawn yet.",
+                             launcher and given to the game when this name plays. You see them \
+                             on yourself in single player and on servers that send no skin of \
+                             their own; other players see them only where the server shows \
+                             skins for names (SkinsRestorer: /skin).",
                         ))),
                 ),
         )

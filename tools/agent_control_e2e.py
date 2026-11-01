@@ -8,12 +8,15 @@ small JSON-RPC client, and saves a screenshot of each run. The ui scenario drive
 widget id instead: the title screen, the options (a slider set by id) and the inventory's slots;
 the options scenario reads and sets options.txt values by key; the events scenario waits for
 states (wait-for) and reads the event log; the consume scenario eats and drinks consumables (a
-golden apple, milk, honey, chorus fruit) and checks their effects, remainders and teleport; the
-pick scenario middle-clicks slots (AbstractContainerScreen's cloning): a full stack in creative, from
-the hotbar and from an item tab, and nothing in survival; the suggestions scenario checks
-slash-command Tab completion on single player's connected client after a fresh launch; the no-ai
-scenario turns No AI on in a scratch game home and checks that horizon-ctl, its MCP server and the
-game's control socket all refuse.
+golden apple, milk, honey, chorus fruit) and checks their effects, remainders and teleport, then
+holds an eye of ender in use and the sprint key with and without blindness; the use-screen
+scenario opens the inventory and the chat over an item in use and checks the use is released, not
+eaten behind the GUI; the pick scenario
+middle-clicks slots (AbstractContainerScreen's cloning): a full stack in creative, from the hotbar
+and from an item tab, and nothing in survival;
+the suggestions scenario checks slash-command Tab completion on single player's connected client
+after a fresh launch; the no-ai scenario turns No AI on in a scratch game home and checks that
+horizon-ctl, its MCP server and the game's control socket all refuse.
 
     python3 tools/agent_control_e2e.py                 # both modes
     python3 tools/agent_control_e2e.py --mode mcp      # one of them
@@ -57,7 +60,7 @@ POSITIONAL = {
     'wait_for': ['condition', 'value'], 'open': ['world', 'seed', 'mode'], 'select': ['slot'],
     'summon': ['kind', 'x', 'y', 'z'], 'interact_entity': ['id'], 'effect': ['id', 'seconds', 'amplifier'],
     'xp': ['levels'], 'options': ['page'], 'lan': ['action'], 'world_backup': ['folder'],
-    'world_rename': ['folder', 'name'], 'world_delete': ['folder'],
+    'world_rename': ['folder', 'name'], 'world_delete': ['folder'], 'mouse': ['button', 'action'],
 }
 # Booleans the game takes as bare words.
 BARE = {'click_slot': ['right', 'shift'], 'click': ['right', 'middle', 'shift'], 'summon': ['baby']}
@@ -69,11 +72,11 @@ class Failed(Exception):
 
 def game_env(screen, home=None):
     """The environment of a game: lab.game_env with HORIZON_HOME `home` (a scratch folder when None), no live-count
-    ping, and on Linux the virtual screen `screen`."""
+    ping, and on Linux the virtual screen `screen` (macOS and Windows have none)."""
     extra = {'HORIZON_TELEMETRY_URL': 'off'}  # no live-count ping from test games
     if home is not None:
         extra['HORIZON_HOME'] = home
-    if sys.platform == 'darwin':
+    if sys.platform in ('darwin', 'win32'):
         return lab.game_env(**extra)
     if not shutil.which('vscreen') and os.environ.get('DISPLAY'):
         return lab.game_env(**extra)
@@ -305,6 +308,15 @@ def scenario(d, out):
         (out / f'{d.name}.png').write_bytes(shot['_image'])
     seen = d('looking_at')
     assert seen['kind'] == 'block' and seen['block']['pos'] == list(target), seen
+
+    # 6. Drop a plank: on a client of a server (single player's server thread) the server must
+    # throw it, not only the window's own world, so ask the server how many planks are left.
+    d('select', slot=planks_id)
+    planks_before = d('inventory')['counts'].get(planks_id, 0)
+    d('drop')
+    d('wait', ticks=5)
+    found = d('command', command=f'clear @s {planks_id} 0')['chat']
+    assert any(f'Found {planks_before - 1} ' in line for line in found), (planks_before, found)
     return {'tree': base, 'log': log_id, 'placed': target}
 
 
@@ -476,7 +488,141 @@ def consume_scenario(d, out):
     assert held(state) is None, state['held']
     assert moved != [0, 0, 0] and abs(moved[0]) <= 8 and abs(moved[2]) <= 8, moved
     d('screenshot', path=str(out / f'consume-{d.name}.png'))
-    return {'teleported': [round(m, 2) for m in moved]}
+    # EnderEyeItem.use: startUsingItem (getUseDuration 0) whether or not a stronghold is found, so a held
+    # button keeps the eye in use, slowing the player, and throws at most one eye until it lets go.
+    d('command', command='clear @s')
+    d('give', item='ender_eye', count=3)
+    d('command', command='tp @s ~ ~ ~ ~ -90')
+    d('mouse', button='right', action='down')
+    d('wait', ticks=12)
+    eye = d('state')
+    d('mouse', button='right', action='up')
+    d('wait', ticks=3)
+    released = d('state')
+    assert eye['using'] is not None, eye['using']
+    assert held(eye) == 'minecraft:ender_eye' and eye['held']['count'] >= 2, eye['held']
+    assert released['using'] is None, released['using']
+    # LocalPlayer.isSprintingPossible: blindness (Player.isMobilityRestricted) keeps the sprint key
+    # from starting a sprint, and the client reads it from the effect the server sent (#4831).
+    d('command', command='clear @s')
+    x, y, z = d('state')['player']['block_pos']
+    # A stone tunnel, so no fluid or falling block reaches the strip.
+    for box, block in [((x - 2, y - 1, z, x + 2, y + 4, z + 40), 'stone'),
+                       ((x - 1, y, z, x + 1, y + 3, z + 40), 'air')]:
+        reply = d('command', command='fill {} {} {} {} {} {} minecraft:{}'.format(*box, block))
+        assert any('filled' in line for line in reply.get('chat', [])), reply
+
+    def hold_sprint():
+        d('command', command=f'tp @s {x + 0.5} {y} {z + 0.5} 0 0')
+        d('wait', ticks=10)
+        d('key', key='w', action='down')
+        d('key', key='ctrl', action='down')
+        d('wait', ticks=20)
+        return d('state')['player']['sprinting']
+
+    def sprints():
+        sprinting = hold_sprint()
+        d('stop')
+        return sprinting
+
+    assert hold_sprint(), 'the sprint key did not start a sprint'
+    # The server's effect, sent to the client as ClientboundUpdateMobEffectPacket.
+    d('command', command='effect give @s minecraft:blindness 60')
+    d('wait', ticks=5)
+    assert not d('state')['player']['sprinting'], 'blindness did not stop a running sprint'
+    d('stop')
+    assert not sprints(), 'the sprint key started a sprint while blind'
+    d('command', command='effect clear @s minecraft:blindness')
+    assert sprints(), 'no sprint once blindness is cleared'
+    return {'teleported': [round(m, 2) for m in moved], 'eye_use_ticks': eye['using']['ticks']}
+
+
+def use_screen_scenario(d, out):
+    """An item in use is released by the keybind screen that opens over it.
+
+    Minecraft.handleKeybinds opens the inventory (and Gui.handleKeybinds the chat) inside the
+    call whose end releases a running use, after Gui.setScreen's KeyMapping.releaseAll cleared
+    key.use. With the button still held, opening the screen must therefore release the use in
+    that tick: the golden apple is not eaten behind the GUI, and no effect is applied. The
+    second half opens the chat the same way; the last part checks that eating without a screen
+    still works. This covers the bin's E/T call sites and the cleared held button, which the
+    interaction-input parity harness (the release sentence itself) cannot see.
+    """
+    # The title screen may still be loading when the game answers the socket.
+    deadline = time.time() + 120
+    while 'singleplayer' not in widgets(d):
+        if time.time() > deadline:
+            raise Failed('the title screen did not open')
+        time.sleep(0.5)
+    d('click', id='singleplayer')
+    deadline = time.time() + 120
+    while not ({'game', 'create-new-world'} & set(widgets(d))):
+        if time.time() > deadline:
+            raise Failed('the world list did not open')
+        time.sleep(0.5)
+    if 'game' not in widgets(d):
+        d('click', id='create-new-world')
+    d('type', field='name', replace=True, text='UseScreen')
+    d('click', id='create-new-world')
+    d('wait_for', condition='loaded', timeout=400)
+    d('command', command='gamemode survival')
+    d('command', command='clear @s')
+    d('give', item='golden_apple', count=64)
+    d('select', slot=1)
+    d('wait', ticks=2)
+
+    def apples(state):
+        held = state['held']
+        assert held and held['item'] == 'minecraft:golden_apple', held
+        return held['count']
+
+    assert apples(d('state')) == 64
+    d('mouse', button='right', action='down')
+    d('wait', ticks=8)
+    assert d('state')['using'] is not None, 'the use did not start'
+    d('key', key='e', action='tap')
+    d('wait', ticks=2)
+    assert d('state')['screen'] == 'inventory', d('state')['screen']
+    # Two seconds is longer than the 1.6 s use: without the release the apple is eaten here.
+    d('wait', ticks=40)
+    state = d('state')
+    assert state['using'] is None, state['using']
+    assert apples(state) == 64, state['held']
+    assert state['player']['effects'] == [], state['player']['effects']
+    d('screenshot', path=str(out / f'use-screen-inventory-{d.name}.png'))
+    # The mouse can only be released with no screen open: close it first.
+    d('key', key='e', action='tap')
+    d('wait', ticks=2)
+    assert d('state')['screen'] == 'playing', d('state')['screen']
+    d('mouse', button='right', action='up')
+
+    # The chat opens from Gui.handleKeybinds, in the same handleKeybinds call.
+    d('mouse', button='right', action='down')
+    d('wait', ticks=8)
+    assert d('state')['using'] is not None, 'the use did not start'
+    d('key', key='t', action='tap')
+    d('wait', ticks=40)
+    state = d('state')
+    assert state['screen'] == 'chat', state['screen']
+    assert state['using'] is None, state['using']
+    assert apples(state) == 64, state['held']
+    assert state['player']['effects'] == [], state['player']['effects']
+    d('screenshot', path=str(out / f'use-screen-chat-{d.name}.png'))
+    d('key', key='esc', action='tap')
+    d('wait', ticks=2)
+    assert d('state')['screen'] == 'playing', d('state')['screen']
+    d('mouse', button='right', action='up')
+
+    # Eating with no screen still finishes: the release only happens for the screens above.
+    d('command', command='clear @s')
+    d('give', item='golden_apple', count=1)
+    d('use_item', hold=2.2)
+    d('wait', ticks=5)
+    state = d('state')
+    effects = {e['id'] for e in state['player']['effects']}
+    assert {'regeneration', 'absorption'} <= effects, effects
+    assert state['held'] is None, state['held']
+    return {'apples_after_screen': 64, 'effects': sorted(effects)}
 
 
 def pick_scenario(d, out):
@@ -622,9 +768,32 @@ def manage_scenario(d, out):
     return {'worlds': len(worlds)}
 
 
+def pause_save_scenario(d, out):
+    # IntegratedServer.tickServer: the tick single player pauses saves everything ("Saving and pausing
+    # game...", #3280), so the world is on disk while the pause menu is open.
+    d('open', world='Paused', seed=7)
+    d('wait_for', condition='loaded', timeout=400)
+    d('wait_ready', seconds=400)
+    level = d.cwd / 'saves/Paused/level.dat'
+    d('wait', ticks=40)
+    playing = level.stat().st_mtime_ns
+    d('wait', ticks=40)
+    assert level.stat().st_mtime_ns == playing, 'level.dat was saved without a pause'
+    d('pause')
+    deadline = time.time() + 15
+    while level.stat().st_mtime_ns == playing and time.time() < deadline:
+        time.sleep(0.25)
+    saved = level.stat().st_mtime_ns != playing
+    shot = d('screenshot', path=str(out / f'{d.name}-pause-save.png'))
+    if '_image' in shot:
+        (out / f'{d.name}-pause-save.png').write_bytes(shot['_image'])
+    assert saved, 'pausing single player did not save level.dat'
+    return {'saved_on_pause': saved}
+
+
 SCENARIOS = {'survival': scenario, 'ui': ui_scenario, 'options': options_scenario, 'events': events_scenario,
-             'consume': consume_scenario, 'pick': pick_scenario, 'suggestions': suggestions_scenario,
-             'manage': manage_scenario}
+             'consume': consume_scenario, 'use-screen': use_screen_scenario, 'pick': pick_scenario,
+             'suggestions': suggestions_scenario, 'manage': manage_scenario, 'pause-save': pause_save_scenario}
 
 
 REFUSAL = "AI features are off: turn off No AI in the launcher's settings"
@@ -635,7 +804,10 @@ def scratch(mode, resources):
     work = Path(tempfile.mkdtemp(prefix=f'hzac-{mode}-'))
     (work / '.local').mkdir()
     (work / '.local/horizon-client').mkdir()
-    os.symlink(resources, work / '.local/horizon-client' / lab.VERSION)
+    lab.link_dir(resources, work / '.local/horizon-client' / lab.VERSION)
+    # A first launch shows the accessibility onboarding before the title (Gui.addInitialScreens): these
+    # scenarios start at the title, as a player does after it.
+    (work / 'options.txt').write_text('onboardAccessibility:false\n')
     # horizon-ctl reads No AI in the game home: this one, not the player's.
     env = game_env(os.environ.get('VSCREEN', 'agent-control'), home=work)
     return work, env
@@ -799,7 +971,7 @@ def main():
     resources = (lab.RESOURCES).resolve()
     if not (resources / 'horizon-resources.json').exists():
         sys.exit(f'no prepared resources in {resources}')
-    out = Path(args.out)
+    out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     modes = ['cli', 'mcp'] if args.mode == 'both' else [args.mode]
     scenarios = [*SCENARIOS, 'no-ai', 'setting'] if args.scenario == 'all' else [args.scenario]

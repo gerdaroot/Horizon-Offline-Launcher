@@ -58,6 +58,12 @@ jobs:
             os: macos-15
             binary: horizon-launcher
             asset: horizon-launcher-macos-arm64.zip
+          # Intel Macs: the same runner, another target.
+          - name: macos-x64
+            os: macos-15
+            target: x86_64-apple-darwin
+            binary: horizon-launcher
+            asset: horizon-launcher-macos-x64.zip
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -69,9 +75,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: launcher
+          key: ${{ matrix.name }}
       - name: Linux libraries GPUI links to
         if: runner.os == 'Linux'
         run: |
@@ -89,14 +98,15 @@ jobs:
         run: |
           echo "HORIZON_LAUNCHER_VERSION=${GITHUB_REF_NAME#launcher@}" >> "$GITHUB_ENV"
           echo "HORIZON_LAUNCHER_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
       - name: Package
         run: |
           mkdir -p ../dist
+          out=target/release; [[ -n "${{ matrix.target }}" ]] && out="target/${{ matrix.target }}/release"
           case "${{ matrix.name }}" in
-            windows) 7z a -tzip ../dist/${{ matrix.asset }} ./target/release/${{ matrix.binary }} > /dev/null ;;
-            linux) tar -czf ../dist/${{ matrix.asset }} -C target/release ${{ matrix.binary }} ;;
-            macos) (cd target/release && zip -q ../../../dist/${{ matrix.asset }} ${{ matrix.binary }}) ;;
+            windows) 7z a -tzip ../dist/${{ matrix.asset }} "./$out/${{ matrix.binary }}" > /dev/null ;;
+            linux) tar -czf ../dist/${{ matrix.asset }} -C "$out" ${{ matrix.binary }} ;;
+            macos*) (cd "$out" && zip -q "$GITHUB_WORKSPACE/dist/${{ matrix.asset }}" ${{ matrix.binary }}) ;;
           esac
       # The installer most people download (packaging/windows/setup.iss); the zip stays what
       # launchers update themselves from.

@@ -79,7 +79,10 @@ fn columns_loaded_past_the_render_distance_mesh_when_they_come_in_range() {
             assert!(Instant::now() < deadline, "streaming never settled");
             let before = (world.chunks.len(), meshed.len());
             let (uploads, _) = streaming.update(&mut world);
-            meshed.extend(uploads.into_iter().map(|(key, _)| key));
+            meshed.extend(uploads.iter().map(|(key, _)| *key));
+            // As the game does once they are uploaded: a worker frees them,
+            // and nothing comes back (`pending` empties).
+            streaming.free(uploads);
             thread::sleep(Duration::from_millis(5));
             let idle = streaming.pending() == 0 && before == (world.chunks.len(), meshed.len());
             quiet = if idle { quiet + 1 } else { 0 };
@@ -211,6 +214,7 @@ fn relit_columns_keep_every_mesh_current() {
         });
         let mut mesher = Mesher {
             nether_shading: false,
+            shader_pack_lighting: false,
             zoom: BiomeZoom::new(0),
             blend_radius: 2,
             smooth_lighting: true,

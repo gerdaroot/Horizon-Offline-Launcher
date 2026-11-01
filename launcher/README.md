@@ -3,8 +3,10 @@
 A small desktop app that installs Horizon builds, prepares them from your own copy of
 Minecraft (a launcher's folder, or a `26.3.jar` you pick with "Choose jar…"), and starts the
 client or a dedicated server, with or without a Microsoft account. A fork of the Horizon
-launcher: see the [repository's README](../README.md) for what differs. Built with [GPUI](https://www.gpui.rs),
-Zed's UI framework; it has its own Cargo workspace and is not part of the game's builds.
+launcher: see the [repository's README](../README.md) for what differs. Built with
+[GPUI Fast](https://github.com/longbridge/gpui-fast), a fork of Zed's UI framework
+[GPUI](https://www.gpui.rs) that draws unchanged views from the last frame; it has its own Cargo
+workspace and is not part of the game's builds.
 
 ![Play](docs/play.png)
 
@@ -14,8 +16,9 @@ The opening, then Play ([clip](docs/opening.webm)):
 
 ## What it does
 
-- **Versions**: lists the published releases of horizon-rust/horizon, installs the build for
-  this platform into its own folder, and removes it again.
+- **Versions**: lists the published builds of horizon-rust/horizon (the current Nightly, the last
+  week's, then the releases from before), installs the build for this platform into its own
+  folder, and removes it again.
 - **Play**: prepares resources as `PLAY.txt` describes (your launcher's 26.3 install, the
   26.3 server jar from that version's own json, and Java 25) and copies its sounds from your
   launcher's asset store (`horizon-prepare sounds`; a launcher install without them only
@@ -33,13 +36,16 @@ The opening, then Play ([clip](docs/opening.webm)):
   system's libraries, the asset index and the assets. Every file must have the size and sha1
   Mojang lists. The Play page shows how far it is and has Cancel; files already whole are kept,
   so the next try goes on from there. **From my install** prepares from the player's own launcher
-  instead, and an install that lacks the version falls back to the download. Without an owner,
+  instead, and an install that lacks the version falls back to the download. **Play** on a version
+  not prepared yet does it all for an owner, as the official launcher does: it prepares from the
+  install when there is one, else downloads (with Mojang's Java when no Java 25 is installed), then
+  starts the game. With no install on the computer the Play page offers the download alone and the
+  Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: search Modrinth (CurseForge support is coming soon) for resource
-  packs and modpacks, each marked Works, Partly or Doesn't run in
-  Horizon; Java mod jars are never offered. Install puts a pack and what it needs in
-  `resourcepacks/` only after its SHA-512 matches, and a
-  modpack goes to the Modpacks page; installed packs show their source and checksum, with Update,
+- **Mods**: **Mods** and **Shader packs** search Horizon's own registry (a Java instance's mods
+  come from Modrinth), **Resource packs** searches Modrinth, each marked Works, Partly or Doesn't
+  run in Horizon; Modrinth's data packs aren't usable yet and have no tab. Install puts a file in the game folder only after its checksum matches, and a
+  modpack (the sidebar's +) goes to the Modpacks page; installed packs show their source and checksum, with Update,
   **Update all** and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
 - **Modpacks**: import a Java modpack (a Modrinth `.mrpack`, a CurseForge zip, or a Prism,
   MultiMC or CurseForge instance folder) and see its coverage report: per mod, ported, partial,
@@ -150,12 +156,12 @@ The opening, then Play ([clip](docs/opening.webm)):
   white on the Play button at 4.5:1 and the accent at 3:1 on every background (a test holds every
   accent in both looks to it). The picture is copied into the data folder.
   `horizon-launcher settings accent NAME`, `settings background PATH|default`.
-- **Language**: English, French and Russian (the languages Horizon's own game menus have).
+- **Language**: English, French, Russian, German, Simplified Chinese, Spanish, Ukrainian and Polish.
   The window follows the system's language unless the player picks one in Settings > Launcher
   (each named in itself); a string a table lacks shows in English. The tables are
   `launcher/lang/<code>.json`, English text to its translation, Horizon's own; a test fails when
   the code asks `tr("…")` for a string a table lacks, or a table keeps one the code dropped.
-  `horizon-launcher settings language system|en|fr|ru`.
+  `horizon-launcher settings language system|en|fr|ru|de|zh|es|uk|pl`.
 - **Skin and cape**: each offline name's **Skin…** in Settings > Account shows the front of its
   skin and cape, takes a skin PNG (64×64, or the older 64×32) and a cape PNG (64×32), and picks
   classic or slim arms. The launcher keeps copies in its `skins/` folder and gives the game
@@ -179,9 +185,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   `datapacks/` under its row: what is there (and which the game has turned off), **Add data pack…**,
   and **Remove** (to the trash); a data pack `.zip` dropped on a world goes into it. The game turns
   a new one on when the world opens. From the command line: `horizon-launcher worlds
-  datapack-list|datapack-add|datapack-remove <world> …`. The Mods page's **Data packs** tab finds
-  them on Modrinth and installs one into the world picked there (`mods search --kind datapack`,
-  `mods install <pack> --world <world>`), saying what of it runs in Horizon.
+  datapack-list|datapack-add|datapack-remove <world> …`. `horizon-launcher mods search --kind datapack`
+  finds them on Modrinth and `mods install <pack> --world <world>` installs one, saying what of it
+  runs in Horizon.
 - **Packs**: Home lists the selected instance's resource packs and shader packs, each with a switch.
   The choice is the game's own: `resourcePacks` in options.txt (a pack turned on goes on top, as
   the game's Resource Packs screen does) and `pickedShaderPack` in `horizon-graphics.txt` (one shader
@@ -194,6 +200,12 @@ The opening, then Play ([clip](docs/opening.webm)):
   step through) with **Copy** (the picture, to the clipboard), **Open**, **Show in folder** and
   **Delete** (to the trash, after a confirmation). From the command line:
   `horizon-launcher screenshots [list|delete] [--instance <name>]`.
+- **Java** (for the Minecraft: Java Edition instances to come): the runtime a version's JSON asks for
+  (`javaVersion`: its major exactly, Java 8 before that field), found among Mojang's runtimes Horizon
+  downloaded (`minecraft/runtime/` in its data folder, the one preparing uses) and the Java homes installed
+  on this computer, read from their `release` files without starting them; when none has that major,
+  Mojang's runtime is downloaded; an instance may name its own Java home instead.
+  `horizon-launcher java [list|install]`.
 - **Multiplayer**: Home lists the selected instance's servers, the game's own Multiplayer list
   (`servers.dat`, each with the picture the game last saw). **Join** starts the game straight into
   one; **Add server** and **Remove** (after a confirmation) change the file the game reads,
@@ -214,11 +226,16 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   when the game starts and brings it back to the front when the game closes; `settings
   while-playing stay|minimize|hide`), the game's extra command-line arguments, an HTTP proxy for
   downloads, and the launcher's own version and update state.
-- **Updates**: there is one channel. Every release is published as the release, GitHub's latest,
-  once its smoke test passed (docs/release-flow.md), and the launcher installs it. The game
-  pre-releases of the old Alpha channel (v0.2.1 on) stay on the Versions page to install
-  by hand, but are never installed as an update. The `update_channel` and `beta_builds` keys
-  older launchers wrote in `settings.json` are ignored and dropped on the next save.
+- **Updates**: Horizon ships only the Nightly (since 2026-10-28, docs/release-flow.md). The
+  launcher installs the current one (the `nightly` pre-release, checksums signed for the Nightly
+  channel) as `nightly-<date>-<commit>` and selects it when the player was on a Nightly, on the
+  newest release or on nothing; a version picked by hand or pinned by an instance stays. Older
+  Nightlies are removed once nothing plays them. Worlds are never touched: they live in the game's
+  folder, not in a version's. The last week's Nightlies (`nightly-<date>`), the `vX.Y.Z`
+  releases and the old Alpha pre-releases stay on the Versions page to install by hand, never as
+  an update. The "Nightly builds" setting and its `nightly` key are gone (an old key is ignored);
+  its "Nightly" instance stays and keeps following the Nightly. The `update_channel` and
+  `beta_builds` keys older launchers wrote are ignored and dropped on the next save.
 - **Game arguments**: extra arguments added to the game's command line (for example
   `--server-thread`), one line where quotes group a word with spaces. They are appended after the
   launcher's own arguments, kept as `game_args` in `settings.json`, and apply the next time the
@@ -246,11 +263,20 @@ minimize, maximize/restore and close; macOS and Linux keep their system title ba
 
 ## Updates
 
-The launcher looks for a newer Horizon release when it starts and every 30 minutes while it
-is open, and shows a small "available, Install" line on Play.
+The launcher looks for a newer Nightly when it starts and every 30 minutes while it is open, and
+shows a small "available, Install" line on Play.
 
 The launcher replaces itself with newer `launcher@` releases of this repository
 (`backend::REPO`), never with upstream's, whose account requirement would come back.
+
+On Linux the release also comes as an AppImage, `horizon-launcher-linux-x86_64.AppImage`: one file
+to download, make executable and run, with no installation and no `libfuse2` (its runtime mounts
+the image where FUSE 2 is there and unpacks it where it is not). It is the same binary as the
+`.tar.gz`, with the libraries GPUI needs beside it; glibc, the graphics drivers and the session's
+D-Bus stay the machine's, so it needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
+newer). A launcher running from one replaces the AppImage itself when it updates
+(`$APPIMAGE`), and the menu entry it writes starts the AppImage rather than the copy inside the
+image, which is gone when the launcher exits.
 
 On Linux a release build that starts writes its applications-menu entry only when there is
 none, or when the program the entry starts (its `TryExec`, else its `Exec`) no longer exists.
@@ -269,6 +295,19 @@ and Windows and publishes `horizon-launcher-linux-x86_64.tar.gz`, `horizon-launc
 (`HORIZON_LAUNCHER_VERSION`); `Cargo.toml`'s version is only what local builds report.
 
 ## Command line
+
+Generate shell completions without opening the window:
+
+```sh
+horizon-launcher completions bash > horizon-launcher.bash
+horizon-launcher completions zsh > _horizon-launcher
+horizon-launcher completions fish > horizon-launcher.fish
+```
+
+Elvish and PowerShell are also supported (`completions elvish` and
+`completions powershell`). Source the generated script from your shell configuration,
+or install it in your shell’s completion directory. Packagers can generate these
+files at build time and install them in the corresponding system directories.
 
 The same binary is a command-line tool; without a subcommand it opens the window. On Windows it
 is a windowed program, so a desktop start opens no terminal; a subcommand writes to the terminal
@@ -295,6 +334,9 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher account offline                play without an account
     horizon-launcher instance [list]                the instances and their game folders (* = Play starts it)
     horizon-launcher instance create <name> [--copy <instance>]   empty, or a copy of one's worlds, options and packs
+    horizon-launcher instance create <name> --minecraft <1.21.4|latest|latest-snapshot>   a Minecraft: Java Edition instance
+    horizon-launcher instance versions [--snapshots] [--old]   the Java Edition versions, from Mojang's list (kept for offline)
+    horizon-launcher instance java <instance> [--home <dir>|--auto] [--memory <MiB>] [--args "<jvm args>"]
     horizon-launcher instance rename|icon|group <instance> <value>  icon: a block or item name, #rrggbb or none
     horizon-launcher instance select <instance>     make Play start it
     horizon-launcher instance version <instance> <tag|latest>   keep it on one installed version, or follow updates
@@ -304,6 +346,8 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher packs add <file> | on|off|remove <pack> [--kind shader]
     horizon-launcher screenshots [list] [--instance <name>]   an instance's screenshots, the newest first
     horizon-launcher screenshots delete <name> [--instance <name>]   moves it to the trash
+    horizon-launcher java [list]          Java runtimes: Mojang's (downloaded by Horizon) and installed ones
+    horizon-launcher java install <21|java-runtime-delta>   downloads Mojang's runtime, each file sha1-checked
     horizon-launcher multiplayer [list] [--instance <name>]   the servers in an instance's Multiplayer list
     horizon-launcher multiplayer add <address> [--name <name>] | remove <server>
     horizon-launcher modpack [list]                 the imported packs and their coverage
@@ -318,7 +362,7 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher mods remove <pack>
     horizon-launcher servers [list]                 the servers hosted from the launcher, and whether they run
     horizon-launcher servers create [--name N] [--seed S | --copy-world DIR] [--mode M] [--difficulty D]
-                     [--max-players N] [--open] [--check-accounts] [--player NAME]... --accept-eula
+                     [--max-players N] [--open] [--offline] [--player NAME]... --accept-eula
     horizon-launcher servers set-up [--version <tag>]   copy a prepared version's programs and game files for servers
     horizon-launcher servers run <server> -- <horizon-server command>   for example: servers run "My server" -- start
     horizon-launcher servers forget <server>        take it off the list (its folder stays)

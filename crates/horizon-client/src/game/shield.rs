@@ -30,11 +30,12 @@ impl Game<'_> {
             &mut self.inventory[slot]
         }
     }
+    /// The stack's `blocks_attacks`: its own component, else its item's.
     pub(super) fn blocks_attacks(
         &self,
         stack: &ItemStack,
-    ) -> Option<&horizon_client::items::BlocksAttacks> {
-        self.res.items().get(&stack.item)?.blocks_attacks.as_ref()
+    ) -> Option<std::borrow::Cow<'_, horizon_client::items::BlocksAttacks>> {
+        horizon_client::items::BlocksAttacks::of_stack(stack, self.items().get(&stack.item))
     }
     /// `ShieldItem.use` (ItemUtils.startUsingInstantly) for the hand at `slot`;
     /// false when that hand holds no blocking item or it is on cooldown.
@@ -45,8 +46,8 @@ impl Game<'_> {
         if self.blocks_attacks(stack).is_none() {
             return false;
         }
-        if self.shield_cooldown == 0 && self.using.is_none() {
-            self.using = Some((slot, 0));
+        if self.shield_cooldown == 0 {
+            self.start_using_item();
         }
         true
     }
@@ -64,7 +65,7 @@ impl Game<'_> {
         if (ticks as i32) < (component.delay_seconds * 20.0).round() as i32 {
             return None;
         }
-        let tags = &self.res.stations().enchantments.damage_tags;
+        let tags = &self.stations().enchantments.damage_tags;
         let matches = |spec: &str| match spec.strip_prefix('#') {
             Some(tag) => tags.get(tag).is_some_and(|t| t.contains(damage_type)),
             None => spec == damage_type,
@@ -117,7 +118,6 @@ impl Game<'_> {
     pub(super) fn after_block(
         &mut self,
         outcome: BlockOutcome,
-        damage: f32,
         attacker: Option<u32>,
         projectile: bool,
     ) {
@@ -125,7 +125,10 @@ impl Game<'_> {
         let Some(stack) = self.stack_in(slot).cloned() else {
             return;
         };
-        let Some(component) = self.blocks_attacks(&stack).cloned() else {
+        let Some(component) = self
+            .blocks_attacks(&stack)
+            .map(std::borrow::Cow::into_owned)
+        else {
             return;
         };
         let at = self
@@ -149,7 +152,7 @@ impl Game<'_> {
             (base + factor * outcome.blocked).floor() as i32
         };
         if item_damage > 0 && !self.creative {
-            let loss = self.durability_loss(&stack, item_damage as u32);
+            let loss = self.wear(&stack, item_damage as u32);
             let max = self
                 .res
                 .items()
@@ -161,14 +164,16 @@ impl Game<'_> {
             {
                 s.damage += loss;
                 if s.damage >= max {
+                    let broken = s.clone();
                     *cell = None;
                     self.using = None;
-                    self.audio.play(
-                        "minecraft:item.shield.break",
-                        at,
-                        0.8,
-                        0.8 + self.world.random.next_float() * 0.4,
-                    );
+                    // ItemStack.hurtAndBreak: onEquippedItemBroken for the hand it was used from.
+                    let hand = if slot == OFFHAND_SLOT {
+                        horizon_world::player_inventory::EquipmentSlot::OffHand
+                    } else {
+                        horizon_world::player_inventory::EquipmentSlot::MainHand
+                    };
+                    self.player_equipment_broke(hand, &broken);
                     return;
                 }
             }
@@ -179,12 +184,12 @@ impl Game<'_> {
         let Some(id) = attacker else {
             // Another player's melee hit has no mob behind it.
             if let Some((from, disable)) = self.combat.player_attacker {
-                let fully = outcome.blocked >= damage;
+                let fully = outcome.fully_blocked;
                 self.blocked_by_attacker(&component, [from[0], from[2]], fully, disable, at);
             }
             return;
         };
-        let fully = outcome.blocked >= damage;
+        let fully = outcome.fully_blocked;
         let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
             return;
         };
@@ -197,7 +202,7 @@ impl Game<'_> {
             m.extra
                 .main_hand
                 .as_deref()
-                .and_then(|item| self.res.items().get(item))
+                .and_then(|item| self.items().get(item))
                 .map_or(0.0, |i| i.disable_blocking_seconds)
         };
         // Ravager.blockedByItem: stunned half the time (the defender pushed

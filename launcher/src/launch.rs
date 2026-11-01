@@ -1,5 +1,7 @@
 //! What runs around the game for one instance (`instances::Meta::launch`): a command run before
-//! it, a wrapper it runs through, and environment variables. All empty by default.
+//! it, a wrapper it runs through, environment variables, and a command run after it exits
+//! ([`after_exit`], started by the launcher once it sees the game end). All empty by default.
+//! The game and the commands also get the instance's own variables ([`instance_vars`]).
 //!
 //! [`wrap`] turns the game's command into one process that does all three, so the launcher still
 //! follows one program (its output, its exit, Stop):
@@ -26,6 +28,9 @@ pub struct Launch {
     /// A command line the game runs through, such as `nice -n 5` (quotes group a word).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub wrapper: String,
+    /// A shell command run in the instance's folder after the game exits, whatever its exit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub post_exit: String,
     /// Environment variables for the game (and the two commands above).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -152,24 +157,39 @@ impl Launch {
     pub fn summary(&self) -> Option<String> {
         let mut parts = Vec::new();
         if !self.pre_launch.trim().is_empty() {
-            parts.push(format!("runs {} first", self.pre_launch.trim()));
+            parts.push(crate::i18n::trf(
+                "runs {command} first",
+                &[("command", self.pre_launch.trim())],
+            ));
         }
         if !self.wrapper.trim().is_empty() {
-            parts.push(format!("through {}", self.wrapper.trim()));
+            parts.push(crate::i18n::trf(
+                "through {wrapper}",
+                &[("wrapper", self.wrapper.trim())],
+            ));
+        }
+        if !self.post_exit.trim().is_empty() {
+            parts.push(crate::i18n::trf(
+                "runs {command} after",
+                &[("command", self.post_exit.trim())],
+            ));
         }
         if self.gamemode {
-            parts.push("with GameMode".into());
+            parts.push(crate::i18n::tr("with GameMode").to_string());
         }
         if self.mangohud {
-            parts.push("with MangoHud".into());
+            parts.push(crate::i18n::tr("with MangoHud").to_string());
         }
         if self.dedicated_gpu {
-            parts.push("on the dedicated GPU".into());
+            parts.push(crate::i18n::tr("on the dedicated GPU").to_string());
         }
         match self.env.len() {
             0 => {}
-            1 => parts.push("with 1 variable".into()),
-            n => parts.push(format!("with {n} variables")),
+            1 => parts.push(crate::i18n::tr("with 1 variable").to_string()),
+            n => parts.push(crate::i18n::trf(
+                "with {count} variables",
+                &[("count", &n.to_string())],
+            )),
         }
         (!parts.is_empty()).then(|| parts.join(", "))
     }
@@ -211,6 +231,75 @@ pub fn env_line(env: &BTreeMap<String, String>) -> String {
         )
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The instance's variables for the game and the commands around it, named as Prism Launcher
+/// names them so its scripts carry over (<https://prismlauncher.org/wiki/help-pages/custom-commands/>):
+/// `INST_NAME`, `INST_ID`, `INST_DIR` and `INST_MC_DIR` (both the instance's game folder), and
+/// for a Java instance `INST_JAVA`, the `java` it runs on.
+pub fn instance_vars(name: &str, id: &str, dir: &std::path::Path, java: Option<&OsStr>) -> Vars {
+    let mut vars = vec![
+        ("INST_NAME", OsString::from(name)),
+        ("INST_ID", OsString::from(id)),
+        ("INST_DIR", dir.as_os_str().to_owned()),
+        ("INST_MC_DIR", dir.as_os_str().to_owned()),
+    ];
+    if let Some(java) = java {
+        vars.push(("INST_JAVA", java.to_owned()));
+    }
+    vars
+}
+
+/// An instance's variables ([`instance_vars`]).
+pub type Vars = Vec<(&'static str, OsString)>;
+
+/// The post-exit command, ready to run in `dir` with the instance's `vars` and variables; none
+/// when there is none. `/bin/sh -c`, or `cmd /D /S /C` on Windows.
+pub fn after_exit(
+    launch: &Launch,
+    dir: &std::path::Path,
+    vars: &[(&'static str, OsString)],
+) -> Option<Command> {
+    let line = launch.post_exit.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd.exe");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.raw_arg(format!("/D /S /C \"{line}\""));
+        }
+        #[cfg(not(windows))]
+        c.args(["/D", "/S", "/C", line]);
+        c
+    } else {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(line);
+        c
+    };
+    cmd.current_dir(dir)
+        .envs(vars.iter().map(|(k, v)| (k, v)))
+        .envs(&launch.env);
+    Some(cmd)
+}
+
+/// Runs the post-exit command, if any, on its own thread: nothing waits for it, its output is
+/// dropped.
+pub fn run_after_exit(launch: &Launch, dir: &std::path::Path, vars: &[(&'static str, OsString)]) {
+    let Some(mut cmd) = after_exit(launch, dir, vars) else {
+        return;
+    };
+    crate::process::hide_console(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    std::thread::spawn(move || {
+        if let Err(e) = cmd.status() {
+            eprintln!("The post-exit command didn't run: {e}");
+        }
+    });
 }
 
 /// The Unix script: the pre-launch command (in a subshell, so its `exit` doesn't end the script

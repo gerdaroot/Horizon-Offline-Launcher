@@ -32,7 +32,7 @@ impl Game<'_> {
 
     /// Every recipe id of the recipe manager (what `/recipe` resolves and suggests).
     pub(super) fn learnable_recipes(&self) -> Vec<String> {
-        self.res.stations().recipe_index.ids().cloned().collect()
+        self.stations().recipe_index.ids().cloned().collect()
     }
     pub(super) fn cmd_recipe(&mut self, id: &str, ctx: &Context) -> R<i32> {
         let targets = self.entities(ctx, "targets", true)?;
@@ -82,7 +82,7 @@ impl Game<'_> {
     /// many recipe book displays changed (a transmute recipe has one per
     /// material count).
     fn change_recipes(&mut self, give: bool, recipes: &[String]) -> i32 {
-        let index = &self.res.stations().recipe_index;
+        let index = &world_stations!(self).recipe_index;
         if give {
             let (count, unlocked) = self.level.recipe_book.add_recipes(index, recipes);
             self.recipe_unlocked(&unlocked);
@@ -109,11 +109,14 @@ impl Game<'_> {
             "mob_attack" | "mob_attack_no_aggro" => DamageKind::MobAttack,
             "arrow" => DamageKind::Arrow,
             "thrown" | "trident" | "mob_projectile" => DamageKind::Thrown,
-            "fireball" | "unattributed_fireball" | "wither_skull" => DamageKind::Fireball,
+            "fireball" | "unattributed_fireball" => DamageKind::Fireball,
+            "wither_skull" => DamageKind::WitherSkull,
             "explosion" | "player_explosion" | "bad_respawn_point" => DamageKind::Explosion,
             "fall" | "ender_pearl" | "fly_into_wall" => DamageKind::Fall,
             "on_fire" => DamageKind::OnFire,
-            "in_fire" | "campfire" | "hot_floor" => DamageKind::InFire,
+            "in_fire" => DamageKind::InFire,
+            "hot_floor" => DamageKind::HotFloor,
+            "campfire" => DamageKind::Campfire,
             "lava" => DamageKind::Lava,
             "drown" => DamageKind::Drown,
             "dry_out" => DamageKind::DryOut,
@@ -124,6 +127,21 @@ impl Game<'_> {
             "freeze" => DamageKind::Freeze,
             "in_wall" => DamageKind::InWall,
             "thorns" => DamageKind::Thorns,
+            "cramming" => DamageKind::Cramming,
+            "falling_anvil" => DamageKind::FallingAnvil,
+            "falling_block" => DamageKind::FallingBlock,
+            "fireworks" => DamageKind::Fireworks,
+            "generic_kill" => DamageKind::GenericKill,
+            "lightning_bolt" => DamageKind::LightningBolt,
+            "out_of_world" => DamageKind::OutOfWorld,
+            "outside_border" => DamageKind::OutsideBorder,
+            "sonic_boom" => DamageKind::SonicBoom,
+            "spit" => DamageKind::Spit,
+            "stalagmite" => DamageKind::Stalagmite,
+            "starve" => DamageKind::Starve,
+            "sulfur_cube_hot" => DamageKind::SulfurCubeHot,
+            "wind_charge" => DamageKind::WindCharge,
+            "wither" => DamageKind::Wither,
             _ => DamageKind::Generic,
         }
     }
@@ -155,23 +173,28 @@ impl Game<'_> {
         let hurt = match target {
             // The causing mob is the one the hit is credited to and thorns
             // answer; the source position gives the knockback its direction.
-            Target::Player => {
+            Target::Player | Target::Guest(_) => {
                 // `DamageSource(type, cause, by)`: the death message names the
                 // causing entity, else the direct one. A mob is noted by
                 // `hurt_player_from`, a player here.
-                if let Some(t @ (Target::Player | Target::Guest(_))) = cause.or(by) {
-                    let name = self.target_name(t);
-                    self.note_direct_entity(&ty, name);
-                }
-                if self.spectator() {
-                    false
-                } else {
-                    let attacker = match cause.or(by) {
-                        Some(Target::Mob(i)) => Some(Some(i)),
-                        _ => Some(None),
-                    };
-                    self.hurt_player_from(amount, from, &ty, attacker)
-                }
+                let named = match cause.or(by) {
+                    Some(t @ (Target::Player | Target::Guest(_))) => Some(self.target_name(t)),
+                    _ => None,
+                };
+                let attacker = match cause.or(by) {
+                    Some(Target::Mob(i)) => Some(Some(i)),
+                    _ => Some(None),
+                };
+                self.for_player(target, |g| {
+                    if g.spectator() {
+                        return false;
+                    }
+                    if let Some(name) = named {
+                        g.note_direct_entity(&ty, name);
+                    }
+                    g.hurt_player_from(amount, from, &ty, attacker)
+                })
+                .unwrap_or(false)
             }
             Target::Mob(id) => {
                 let attacker = cause.or(by).and_then(|t| match t {
@@ -184,10 +207,15 @@ impl Game<'_> {
                     attacker,
                     from,
                 };
-                self.mobs
+                let hurt = self
+                    .mobs
                     .iter_mut()
                     .find(|m| m.id == id)
-                    .is_some_and(|m| m.damage(amount, damage))
+                    .is_some_and(|m| m.damage(amount, damage));
+                if hurt {
+                    self.resolve_player_responsible(id, damage);
+                }
+                hurt
             }
             _ => false,
         };
@@ -216,27 +244,43 @@ impl Game<'_> {
             return Ok(0);
         };
         let current = self.target_rotation(t);
+        let mut look_at_target = None;
         let rot = if let Some(Arg::Coords(c)) = ctx.get("rotation") {
             // Relative parts are offsets from the entity's own rotation.
             c.rotation(current)
         } else {
+            let mut faced_entity = None;
             let to = if ctx.has("entity") {
                 let faced = self.entities(ctx, "facingEntity", false)?;
                 let Some(f) = faced.first().copied() else {
                     return Ok(0);
                 };
                 let mut p = self.target_position(f).unwrap_or(pos);
-                if matches!(ctx.get("facingAnchor"), Some(Arg::Anchor(true))) {
+                let eyes = matches!(ctx.get("facingAnchor"), Some(Arg::Anchor(true)));
+                if eyes {
                     p[1] += self.target_eye_height(f);
                 }
+                faced_entity = Some((f, eyes));
                 p
             } else {
                 self.position_arg(ctx, "facingLocation").unwrap_or(pos)
             };
-            let from = [pos[0], pos[1] + self.target_eye_height(t), pos[2]];
+            // LookAt.perform: Entity.lookAt from the source's anchor (the
+            // feet, unless `anchored eyes`).
+            let anchored_eyes = self.command_source.is_some_and(|s| s.eyes);
+            let eye = if anchored_eyes {
+                self.target_eye_height(t)
+            } else {
+                0.0
+            };
+            let from = [pos[0], pos[1] + eye, pos[2]];
+            look_at_target = Some((anchored_eyes, to, faced_entity));
             look_at(from, to)
         };
         self.teleport_to(t, pos, Some(rot));
+        if let Some((eyes, to, entity)) = look_at_target {
+            self.send_player_look_at(t, eyes, to, entity);
+        }
         if t == Target::Player {
             self.pitch = rot[1].clamp(-90.0, 90.0);
         }
@@ -1129,7 +1173,7 @@ impl Game<'_> {
             };
             let vehicle_name = self.target_name(v);
             match target {
-                Target::Player => self.dismount_mount(),
+                Target::Player => self.stop_riding(),
                 Target::Mob(rider) => self.dismount_mob(rider),
                 _ => {}
             }
@@ -1162,24 +1206,67 @@ impl Game<'_> {
             }
             up = self.ride_vehicle(v);
         }
-        // Players and mobs can ride mobs.
-        let Target::Mob(mob_id) = vehicle else {
-            return Err(err(
-                "commands.ride.mount.failure.generic",
-                &[&name.plain(), &vehicle_name.plain()],
-            ));
-        };
         let rider = match target {
             Target::Mob(id) => Some(id),
             _ => None,
         };
-        if !(target == Target::Player || rider.is_some())
-            || !self.mobs.iter().any(|m| m.id == mob_id && m.alive())
-        {
-            return Err(err(
+        let generic = || {
+            err(
                 "commands.ride.mount.failure.generic",
                 &[&name.plain(), &vehicle_name.plain()],
-            ));
+            )
+        };
+        // Only players and mobs ride.
+        if !(target == Target::Player || rider.is_some()) {
+            return Err(generic());
+        }
+        // `RideCommand.mount` forces the ride (`startRiding(vehicle, true, true)`),
+        // which skips `canRide` and `canAddPassenger`: a boat under water still
+        // takes the rider. Horizon's boats seat at most `max_passengers`, so a
+        // full boat still refuses. Minecarts carry only players here: Horizon's
+        // carts have no mob passengers yet.
+        match vehicle {
+            Target::Boat(id) => {
+                let Some(i) = self.boats.iter().position(|b| b.id == id) else {
+                    return Err(generic());
+                };
+                if self.boat_passengers(id) >= self.boats[i].max_passengers() {
+                    return Err(generic());
+                }
+                if let Some(rider) = rider {
+                    self.mount_mob(rider, id);
+                } else {
+                    self.riding = Some(id);
+                    self.yaw = self.boats[i].yaw;
+                    // sendEventAndTriggers: START_RIDING_TRIGGER.
+                    self.trigger_player("minecraft:started_riding");
+                }
+                self.feedback(Text::translate(
+                    "commands.ride.mount.success",
+                    &[name, vehicle_name],
+                ));
+                return Ok(1);
+            }
+            Target::Cart(id) => {
+                if target != Target::Player || self.ridden_by_guest(id) {
+                    return Err(generic());
+                }
+                self.riding = Some(id);
+                self.trigger_player("minecraft:started_riding");
+                self.feedback(Text::translate(
+                    "commands.ride.mount.success",
+                    &[name, vehicle_name],
+                ));
+                return Ok(1);
+            }
+            _ => {}
+        }
+        // Mobs carry players and mobs.
+        let Target::Mob(mob_id) = vehicle else {
+            return Err(generic());
+        };
+        if !self.mobs.iter().any(|m| m.id == mob_id && m.alive()) {
+            return Err(generic());
         }
         if let Some(rider) = rider {
             // Entity.startRiding.
@@ -1208,12 +1295,14 @@ impl Game<'_> {
     /// Entity.getVehicle: the player's mount, or a mob's.
     pub(super) fn ride_vehicle(&self, t: Target) -> Option<Target> {
         let id = match t {
-            Target::Player => return self.riding.map(Target::Mob),
+            Target::Player => self.riding?,
             Target::Mob(id) => self.mobs.iter().find(|m| m.id == id)?.extra.mount?,
             _ => return None,
         };
         Some(if self.boats.iter().any(|b| b.id == id) {
             Target::Boat(id)
+        } else if self.carts.iter().any(|c| c.id == id) {
+            Target::Cart(id)
         } else {
             Target::Mob(id)
         })
@@ -1260,12 +1349,12 @@ impl Game<'_> {
         let respect = matches!(ctx.get("respectTeams"), Some(Arg::Bool(true)));
         let max_y = match ctx.get("maxHeight") {
             Some(Arg::Int(h)) => *h,
-            _ => horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT,
+            _ => self.world.top_y(),
         };
-        if max_y < horizon_client::chunk::MIN_Y {
+        if max_y < self.world.bottom_y() {
             return Err(err(
                 "commands.spreadplayers.failed.invalid.height",
-                &[&max_y, &horizon_client::chunk::MIN_Y],
+                &[&max_y, &self.world.bottom_y()],
             ));
         }
         let targets = self.entities(ctx, "targets", false)?;
@@ -1466,7 +1555,7 @@ impl Game<'_> {
         let mut air2 = air(y);
         y -= 1;
         let mut air1 = air(y);
-        while y > horizon_client::chunk::MIN_Y {
+        while y > self.world.bottom_y() {
             y -= 1;
             let current = air(y);
             if !current && air1 && air2 {

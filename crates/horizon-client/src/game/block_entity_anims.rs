@@ -33,6 +33,10 @@ impl Game<'_> {
     pub(super) fn block_entity_event(&mut self, pos: [i32; 3], a: i32, b: i32) {
         let state = self.world.block(pos[0], pos[1], pos[2]).0;
         let time = self.world.game_time;
+        // PotentSulfurBlock.triggerEvent.
+        if self.potent_sulfur_eruption_event((pos[0], pos[1], pos[2])) {
+            return;
+        }
         match self.be_anims.ticker(state) {
             Some(Ticker::Lid) => {
                 self.be_anims
@@ -311,13 +315,18 @@ impl Game<'_> {
                         .tick(pos, &players, &mut anims.book_random);
                 }
                 Ticker::Shulker { facing } => {
-                    // The lid's push of entities in its way (moveCollidedEntities)
-                    // and the neighbour updates are left to the level.
-                    self.be_anims
-                        .shulkers
-                        .entry(pos)
-                        .or_default()
-                        .tick(pos, facing);
+                    // A window that simulates the world ticks its boxes on the
+                    // server pass (`tick_block_entities`, which also applies
+                    // `moveCollidedEntities`); a server's client only animates
+                    // what it is sent. Either way the collision queries read
+                    // the lids from `World::shulkers` (`sync_shulkers`).
+                    if self.remote.is_some() {
+                        self.be_anims
+                            .shulkers
+                            .entry(pos)
+                            .or_default()
+                            .tick(pos, facing);
+                    }
                 }
                 Ticker::Skull { powered } => {
                     self.be_anims.skulls.entry(pos).or_default().tick(powered);
@@ -457,7 +466,7 @@ impl Game<'_> {
                     if is_conduit(section.get(i)) {
                         found.push([
                             cx * 16 + (i & 15) as i32,
-                            horizon_client::chunk::MIN_Y + si as i32 * 16 + (i >> 8) as i32,
+                            self.world.bottom_y() + si as i32 * 16 + (i >> 8) as i32,
                             cz * 16 + ((i >> 4) & 15) as i32,
                         ]);
                     }
@@ -586,6 +595,11 @@ impl Game<'_> {
             at.z.floor() as i32,
         );
         let up = BlockPos::new(p.x, top.floor() as i32, p.z);
+        // A server's client has no live biome features to ask: it answers from
+        // the chunks and the weather it was sent.
+        if self.remote.is_some() {
+            return self.raining_at(p) || self.raining_at(up);
+        }
         self.with_level(|b, level, _| b.is_raining_at(level, p) || b.is_raining_at(level, up))
     }
     /// `ConduitBlockEntity.updateAndAttackTarget`: while the conduit hunts
@@ -764,6 +778,15 @@ impl Game<'_> {
             return None;
         };
         let skin = skull.skin.as_ref()?;
+        // PlayerSkin.Patch: a `texture` override replaces the profile's skin.
+        if let Some(texture) = &skin.texture
+            && let Some(sprite) =
+                skins::patch_skin(texture, &mut self.skin_downloads.borrow_mut(), |location| {
+                    self.gui.atlas.sprites.contains_key(location)
+                })
+        {
+            return Some(sprite);
+        }
         // The texture a packed or resolved `textures` property fetches: the
         // download of a static profile, or the one the services answer for a
         // `Dynamic` (name- or id-only) profile.
@@ -782,6 +805,7 @@ impl Game<'_> {
             let mut downloads = self.skin_downloads.borrow_mut();
             if self.gui.atlas.sprites.contains_key(&location) {
                 let _ = downloads.state(skins::Kind::Skin, &url);
+                downloads.drawn(&location);
                 return Some(location);
             }
             // Its slot was evicted: offer the image again.

@@ -15,6 +15,12 @@ pub struct Manifest {
     /// Exact source revisions tested together, never mutable tags.
     pub horizon: String,
     pub mixins: String,
+    /// The version of Horizon's native hook points (`game/native_hooks.rs`,
+    /// `NATIVE_HOOKS_API`) a mod that hooks nothing else needs: the launcher
+    /// builds it on any Horizon with that version or a later one, and
+    /// `horizon` is only the revision it was tested on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<u32>,
 }
 
 pub fn revision(value: &str) -> bool {
@@ -32,6 +38,7 @@ impl Manifest {
             || self.game.is_empty()
             || !revision(&self.horizon)
             || !revision(&self.mixins)
+            || self.hooks == Some(0)
         {
             return Err(
                 "invalid native manifest: schema 1, id, version, game and exact revisions required"
@@ -59,8 +66,36 @@ impl Manifest {
 
 pub struct Bundle {
     pub manifest: Manifest,
-    /// Validated relative paths; only TOML and Rust beneath `mixins/<id>/`.
+    /// Validated relative paths: Rust and TOML, plus files under `mixins/<id>/data/` or a
+    /// `data/` folder deeper in (a crate's).
     pub files: BTreeMap<String, Vec<u8>>,
+}
+
+/// Whether `rest` (a path inside `mixins/<id>/`) is a data file: under the bundle's `data/`, or
+/// under the top-level `data/` of a folder of it (a crate's, `engine/data/`), not any folder
+/// named `data` deeper in.
+fn in_data(rest: &str) -> bool {
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() >= 2 && (parts[0] == "data" || (parts.len() >= 3 && parts[1] == "data"))
+}
+
+/// Whether `rest` is one of the text files a crate folder usually carries, which a crate may need
+/// to compile (`#![doc = include_str!("../README.md")]`): `README*`, `LICENSE*`, `COPYING*`,
+/// `NOTICE*` and `.gitignore`, in the bundle's folder or a top-level folder of it.
+fn text(rest: &str) -> bool {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let name = parts[parts.len() - 1];
+    parts.len() <= 2
+        && (["README", "LICENSE", "LICENCE", "COPYING", "NOTICE"]
+            .iter()
+            .any(|p| name.starts_with(p))
+            || name == ".gitignore")
+}
+
+/// Whether a bundle may carry the file `rest` (its path under `mixins/<id>/`): sources and
+/// manifests, data, and the text files of a crate folder.
+pub fn allowed(rest: &str) -> bool {
+    rest.ends_with(".rs") || rest.ends_with(".toml") || in_data(rest) || text(rest)
 }
 
 impl Bundle {
@@ -74,7 +109,7 @@ impl Bundle {
         let mut total = 0u64;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-            let name = entry.name().to_owned();
+            let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             if entry.is_dir() {
                 continue;
             }
@@ -109,7 +144,10 @@ impl Bundle {
         manifest.check()?;
         let prefix = format!("mixins/{}/", manifest.id);
         for name in files.keys().filter(|n| n.as_str() != MANIFEST) {
-            if !name.starts_with(&prefix) || !(name.ends_with(".rs") || name.ends_with(".toml")) {
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                return Err(format!("unexpected native source: {name}"));
+            };
+            if !allowed(rest) {
                 return Err(format!("unexpected native source: {name}"));
             }
         }
@@ -154,6 +192,7 @@ mod tests {
             game: "26.3".into(),
             horizon: "a".repeat(40),
             mixins: "b".repeat(40),
+            hooks: None,
         }
     }
     fn read(name: &str, extras: &[(&str, &[u8])], mixin: &str) -> Result<Bundle, String> {
@@ -200,12 +239,40 @@ mod tests {
         assert!(facts.capabilities.is_empty());
     }
     #[test]
+    fn accepts_binary_data_in_the_bundle_data_directory() {
+        let bytes = [0, 255, 42];
+        let bundle = read(
+            "data",
+            &[
+                ("mixins/veinminer/data/nested/table.bin", &bytes),
+                ("mixins/veinminer/engine/data/model.bin", &bytes),
+                ("mixins/veinminer/engine/README.md", b"# engine"),
+                ("mixins/veinminer/engine/LICENSE-MIT", b"MIT"),
+                ("mixins/veinminer/.gitignore", b"target/"),
+            ],
+            &mixin(),
+        )
+        .unwrap();
+        assert_eq!(
+            bundle.files["mixins/veinminer/data/nested/table.bin"],
+            bytes
+        );
+    }
+    #[test]
     fn rejects_path_traversal_and_non_source_payloads() {
         for (i, name) in [
             "../escape.rs",
             "/absolute.rs",
             "mixins/other/hook.rs",
             "mixins/veinminer/code.dll",
+            "mixins/veinminer/data/../code.dll",
+            "mixins/veinminer/database/file.bin",
+            "mixins/veinminer/engine/data.bin",
+            "mixins/veinminer/engine/src/data/blob.bin",
+            "mixins/veinminer/engine/src/README.md",
+            "mixins/veinminer/engine/README.dll/x.bin",
+            "mixins/veinminer/engine/Cargo.lock",
+            "mixins/other/data/file.bin",
             "mixins\\veinminer\\hook.rs",
         ]
         .iter()
@@ -234,5 +301,23 @@ mod tests {
             .check()
             .is_err()
         );
+    }
+    #[test]
+    fn hooks_is_optional_and_kept() {
+        let hooked = Manifest {
+            hooks: Some(1),
+            ..manifest()
+        };
+        assert!(hooked.check().is_ok());
+        let text = serde_json::to_string(&hooked).unwrap();
+        assert!(text.contains("\"hooks\":1"), "{text}");
+        assert_eq!(serde_json::from_str::<Manifest>(&text).unwrap(), hooked);
+        let plain = serde_json::to_string(&manifest()).unwrap();
+        assert!(!plain.contains("hooks"), "{plain}");
+        let zero = Manifest {
+            hooks: Some(0),
+            ..manifest()
+        };
+        assert!(zero.check().is_err());
     }
 }

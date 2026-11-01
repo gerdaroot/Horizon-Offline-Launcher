@@ -82,6 +82,13 @@ impl Game<'_> {
                 }
             }
             None if &*facts.get(state).name == "minecraft:water" => (p, count * 3, 3.0, 1.0, false),
+            // A mod block the level answered bone meal for: the port knows no
+            // `BonemealableBlock.Type` for it, and vanilla's `GROWER` is the
+            // one a block growing itself has, so the sparks stay inside it
+            // rather than spreading over its neighbours.
+            None if !facts.get(state).name.starts_with("minecraft:") => {
+                (p, count, 0.5, self.block_shape_top(p), true)
+            }
             None => return,
         };
         self.spawn_particles(at, count, xz, height, floating, ParticleType::HappyVillager);
@@ -179,6 +186,17 @@ impl Game<'_> {
             self.particles.add(&options, [x, y, z], [0.0; 3]);
         }
     }
+    /// `LevelEventHandler` 1503: smoke on the inserted eye.
+    pub(super) fn end_portal_frame_smoke(&mut self, pos: BlockPos) {
+        let options = ParticleOptions::simple(ParticleType::Smoke);
+        for _ in 0..16 {
+            let r = self.particles.level_random();
+            let x = f64::from(pos.x) + (5.0 + r.next_double() * 6.0) / 16.0;
+            let z = f64::from(pos.z) + (5.0 + r.next_double() * 6.0) / 16.0;
+            self.particles
+                .add(&options, [x, f64::from(pos.y) + 0.8125, z], [0.0; 3]);
+        }
+    }
     /// `LevelEventHandler` 2006 (`DragonFireball.onHit`): 200 dragon breath
     /// particles thrown outwards, then the explosion sound when `data` is 1.
     pub(super) fn dragon_fireball_burst(&mut self, pos: BlockPos, data: i32) {
@@ -238,10 +256,7 @@ impl Game<'_> {
         let mut root = None;
         for step in 1..11 {
             let y = pos.y + step;
-            if !(horizon_client::chunk::MIN_Y
-                ..horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT)
-                .contains(&y)
-            {
+            if !(self.world.bottom_y()..self.world.top_y()).contains(&y) {
                 break;
             }
             let state = self.world.block(pos.x, y, pos.z);
@@ -291,6 +306,12 @@ impl Game<'_> {
     /// (an end portal opening, the dragon's death roar): here, and sent to
     /// every guest whatever their dimension.
     pub(super) fn global_level_event(&mut self, id: i32, pos: [i32; 3], data: i32) {
+        // ServerLevel.globalLevelEvent: without global_sound_events it is a
+        // plain level event, which the client has no sound for (1023, 1028
+        // and 1038 are only in `LevelEventHandler.globalLevelEvent`).
+        if !self.ui.rules.bool("global_sound_events") {
+            return;
+        }
         self.global_level_event_sound(id, pos);
         if self.audio.capture.is_some() {
             self.lan_global_events.push((id, pos, data));

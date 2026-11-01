@@ -66,10 +66,29 @@ pub(super) fn recipes(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Value
     }
 }
 
+/// The packs' recipe files over the game's own: the top pack's file for
+/// each id (`SimpleJsonResourceReloadListener`).
+pub(super) fn overlay_recipes(
+    overlay: &horizon_world::loot::PackOverlay,
+    out: &mut BTreeMap<String, Value>,
+) {
+    for (id, files) in overlay.kind("recipe") {
+        if let Ok(v) = serde_json::from_slice::<Value>(horizon_world::loot::PackOverlay::top(files))
+        {
+            out.insert(id.to_owned(), v);
+        }
+    }
+}
+
 /// The packet's payload for the vanilla data pack in `resources`.
-pub fn update_recipes(resources: &Path, sync: &SyncData) -> Vec<u8> {
+pub fn update_recipes(
+    resources: &Path,
+    sync: &SyncData,
+    overlay: &horizon_world::loot::PackOverlay,
+) -> Vec<u8> {
     let mut all = BTreeMap::new();
     recipes(&resources.join("data/minecraft/recipe"), "", &mut all);
+    overlay_recipes(overlay, &mut all);
     let tags: BTreeMap<&str, &[i32]> = sync
         .tags
         .registries
@@ -139,7 +158,9 @@ pub fn update_recipes(resources: &Path, sync: &SyncData) -> Vec<u8> {
             None => w.varint(1),
         }
         w.varint(item_stack);
-        w.varint(item(r["result"]["id"].as_str().unwrap_or("minecraft:air")));
+        w.varint(item(
+            horizon_world::loot::recipe_result_id(&r["result"]).unwrap_or("minecraft:air"),
+        ));
         w.varint(r["result"]["count"].as_i64().unwrap_or(1) as i32);
         w.varint(0); // no components added
         w.varint(0); // nor removed
