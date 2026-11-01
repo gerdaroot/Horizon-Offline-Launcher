@@ -1,0 +1,35 @@
+name: Crash or won't start
+description: The launcher or the game closes, crashes or doesn't open
+labels: [crash]
+body:
+  - type: dropdown
+    id: what
+    attributes:
+      label: What crashes?
+      options:
+        - The launcher doesn't open
+        - The game crashes when I press Play
+        - The game crashes later (in a world, on a server)
+        - Prepare fails
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System and graphics card
+      description: Windows 10/11, Linux or macOS, and your GPU (Win+R → dxdiag → Display tab)
+      placeholder: Windows 10 22H2, Intel UHD 620
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Crash report
+      description: |
+        Drag the newest file here from `%APPDATA%\horizon\crash-reports` (Linux: `~/.local/share/horizon/crash-reports`, macOS: `~/Library/Application Support/horizon/crash-reports`).
+        If the launcher itself doesn't open, run it from a terminal (`%LOCALAPPDATA%\Programs\HorizonOfflineLauncher\horizon-offline-launcher.exe`) and paste what it prints.
+      render: text
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do before it happened?

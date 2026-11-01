@@ -10,6 +10,7 @@ mod cli;
 mod cli_tools;
 mod collection;
 mod console;
+mod crash_log;
 mod console_page;
 mod cull;
 mod datapacks_page;
@@ -4330,6 +4331,7 @@ fn main() {
         eprintln!("Could not restore the launcher's terminal streams: {error}");
         std::process::exit(1);
     }
+    crash_log::install();
     perf::process_started();
     backend::exe_path();
     // What the launcher downloads goes through the player's proxy, if they set one: the parts
