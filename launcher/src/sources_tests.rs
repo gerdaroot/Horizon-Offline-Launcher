@@ -281,6 +281,7 @@ fn a_main_jar_elsewhere_is_found_from_the_metadata() {
 fn the_modrinth_app_atlauncher_and_gdlauncher_are_found() {
     for (root, base, jar) in [
         ("ModrinthApp", "meta", "versions/26.3/26.3.jar"),
+        ("AstralRinthApp", "meta", "versions/26.3/26.3.jar"),
         (
             "atlauncher",
             "",
@@ -575,4 +576,5 @@ fn each_system_has_its_launcher_folders() {
         "the official launcher: C:/Users/r/AppData/Roaming/.minecraft"
     );
     assert!(got.contains(&"ATLauncher: C:/Users/r/AppData/Roaming/ATLauncher".into()));
+    assert!(got.contains(&"AstralRinth: C:/Users/r/AppData/Roaming/AstralRinthApp".into()));
 }

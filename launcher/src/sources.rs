@@ -147,10 +147,11 @@ pub fn known_folders(os: Os, f: &Folders) -> Vec<(&'static str, PathBuf)> {
             ("ATLauncher", f.data.join("ATLauncher")),
         ],
     };
-    // Names every system shares: the Modrinth App before its rename, GDLauncher and its
-    // previous version (GDLauncher Next).
+    // Names every system shares: the Modrinth App before its rename, AstralRinth (the Modrinth
+    // App's fork, same layout), GDLauncher and its previous version (GDLauncher Next).
     list.extend([
         ("Modrinth App", f.data.join("com.modrinth.theseus")),
+        ("AstralRinth", f.data.join("AstralRinthApp")),
         ("GDLauncher", f.data.join("gdlauncher_carbon")),
         ("GDLauncher", f.config.join("gdlauncher_next")),
     ]);
@@ -256,6 +257,7 @@ fn launcher_of(path: &Path) -> Option<&'static str> {
             "PrismLauncher" => Some("Prism Launcher"),
             "multimc" | "MultiMC" => Some("MultiMC"),
             "ModrinthApp" | "com.modrinth.theseus" => Some("the Modrinth App"),
+            "AstralRinthApp" => Some("AstralRinth"),
             "atlauncher" | "ATLauncher" => Some("ATLauncher"),
             "gdlauncher_carbon" | "gdlauncher_next" => Some("GDLauncher"),
             _ => None,
