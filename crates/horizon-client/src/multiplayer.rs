@@ -138,6 +138,35 @@ pub enum Outcome {
     Back,
     Connect { address: String, lan: bool },
 }
+
+/// The job of [`Screen::buttons`]'s button `id`, for the controller.
+pub fn button_action(id: u8) -> Option<crate::widgets::Action> {
+    use crate::widgets::Action;
+    match id {
+        46 => Some(Action::Back),
+        50 => Some(Action::Done),
+        51 | 53 | 57 | 59 => Some(Action::Cancel),
+        _ => None,
+    }
+}
+
+impl Screen {
+    /// The id native mods see for this screen (`NativeScreenView.id`, the
+    /// screen hooks): one per variant, a hook's contract, so it stays the
+    /// same from release to release. A new variant must add one.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::List { .. } => "multiplayer",
+            Self::Edit { index: None, .. } => "add_server",
+            Self::Edit { index: Some(_), .. } => "edit_server",
+            Self::Direct { .. } => "direct_connect",
+            Self::ConfirmDelete { .. } => "server_delete",
+            Self::Friend { .. } => "friends_join",
+            Self::Disconnected { .. } => "disconnected",
+        }
+    }
+}
+
 /// A button: x, y, width, label, enabled, id.
 pub type ButtonSpec = (f32, f32, f32, String, bool, u8);
 
@@ -157,7 +186,16 @@ fn centered_x(width: f32, text_width: f32) -> f32 {
     half(width) - half(text_width)
 }
 
+/// The server list, beside `saves/`; with `--player-dir`, the player's own.
 pub fn servers_file(saves: &Path) -> PathBuf {
+    servers_file_of(crate::logging::player_dir_override(), saves)
+}
+
+/// [`servers_file`] for a given `--player-dir`.
+fn servers_file_of(player: Option<&Path>, saves: &Path) -> PathBuf {
+    if let Some(player) = player {
+        return player.join("servers.dat");
+    }
     saves
         .parent()
         .map_or_else(|| PathBuf::from("servers.dat"), |p| p.join("servers.dat"))
@@ -231,7 +269,15 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                             }
                         }
                         // OnlineServerEntry: SUCCESSFUL only for this game's protocol.
-                        if protocol == i64::from(horizon_protocol::PROTOCOL_VERSION) {
+                        let joinable = protocol == i64::from(horizon_protocol::PROTOCOL_VERSION)
+                            || (crate::net::older_servers_enabled()
+                                && i32::try_from(protocol)
+                                    .ok()
+                                    .and_then(
+                                        horizon_protocol::adapter::ServerVersion::from_protocol,
+                                    )
+                                    .is_some());
+                        if joinable {
                             Ping::Ok {
                                 motd,
                                 players,
@@ -354,6 +400,55 @@ pub fn add_official_server(game_dir: &Path) -> std::io::Result<()> {
         servers::prepend(&file, &ServerEntry::new(name, address))?;
     }
     std::fs::write(marker, format!("{address}\n"))
+}
+
+/// Servers Horizon partners with, offered once below the official server: a name (with the
+/// players it is for) and an address like any entry.
+pub const PARTNER_SERVERS: &[(&str, &str)] =
+    &[("Afri-Network (South Africa)", "afri-network.co.za")];
+/// Beside servers.dat: the partner addresses already offered, one per line, so a player who
+/// deletes one never gets it back.
+const PARTNER_MARKER: &str = "horizon_partner_servers.txt";
+
+/// Adds each partner server not offered before to the list in `game_dir`, just below the
+/// official server (last when the list doesn't have it), unless the list has its address.
+pub fn add_partner_servers(game_dir: &Path) -> std::io::Result<()> {
+    let marker = game_dir.join(PARTNER_MARKER);
+    let offered = match std::fs::read_to_string(&marker) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        // Can't tell what was offered: offer nothing rather than twice.
+        Err(_) => return Ok(()),
+    };
+    let was_offered = |a: &str| offered.lines().any(|l| address_key(l) == address_key(a));
+    let new: Vec<_> = PARTNER_SERVERS
+        .iter()
+        .filter(|(_, a)| !was_offered(a))
+        .collect();
+    if new.is_empty() {
+        return Ok(());
+    }
+    let file = game_dir.join("servers.dat");
+    let _guard = SAVING.lock();
+    // Each new partner goes below the one before it, the first below the official server.
+    let mut anchor = address_key(OFFICIAL_SERVER.1);
+    for (name, address) in &new {
+        if !servers::load(&file)
+            .iter()
+            .any(|s| address_key(&s.ip) == address_key(address))
+        {
+            servers::insert_after(&file, &ServerEntry::new(name, address), |ip| {
+                address_key(ip) == anchor
+            })?;
+            anchor = address_key(address);
+        }
+    }
+    let mut text = offered;
+    for (_, address) in &new {
+        text.push_str(address);
+        text.push('\n');
+    }
+    std::fs::write(marker, text)
 }
 
 /// Points the entries for an earlier official address at `address`, each
@@ -952,6 +1047,7 @@ impl Screen {
         caret: &mut crate::ui::Caret,
         focused_at: Instant,
         cursor: (f32, f32),
+        hide_address: bool,
     ) {
         let (w, h) = (batch.width, batch.height);
         let max = self.max_length();
@@ -1209,7 +1305,17 @@ impl Screen {
                             let header = crate::lang::get_or("lanServer.title", "LAN World");
                             batch.text(atlas, &header, cx + 35.0, cy + 1.0, u32::MAX, false);
                             batch.text(atlas, &game.motd, cx + 35.0, cy + 12.0, gray, false);
-                            batch.text(atlas, &game.address, cx + 35.0, cy + 23.0, gray, false);
+                            // NetworkServerEntry.extractContent: `hideServerAddress`
+                            // draws HIDDEN_ADDRESS_TEXT in the address's place.
+                            let hidden;
+                            let address = if hide_address {
+                                hidden =
+                                    crate::lang::get_or("selectServer.hiddenAddress", "(Hidden)");
+                                &hidden
+                            } else {
+                                &game.address
+                            };
+                            batch.text(atlas, address, cx + 35.0, cy + 23.0, gray, false);
                         }
                     }
                 }
@@ -1366,7 +1472,9 @@ impl Screen {
         }
     }
     /// `DirectJoinServerScreen.keyPressed`: Enter joins the typed address
-    /// while the Join Server button is active.
+    /// while the Join Server button is active. On the server list it is
+    /// `ServerSelectionList.OnlineServerEntry.keyPressed`: Enter joins the
+    /// selected server or LAN game, as a click on it does.
     pub fn confirm(&self) -> Outcome {
         match self {
             Self::Direct { address } if servers::parse_address(address).is_some() => {
@@ -1375,6 +1483,15 @@ impl Screen {
                     lan: false,
                 }
             }
+            Self::List {
+                servers,
+                selected,
+                lan,
+                ..
+            } => match selected.and_then(|i| entry_address(servers, lan, i)) {
+                Some((address, lan)) => Outcome::Connect { address, lan },
+                None => Outcome::None,
+            },
             _ => Outcome::None,
         }
     }
@@ -1624,6 +1741,60 @@ impl Screen {
         Outcome::None
     }
     /// The mouse wheel over the server list (`scrollRate`: half a row).
+    /// Up or Down on the list (`AbstractSelectionList.nextEntry`): the next
+    /// server or LAN game, the first (Down) or last (Up) with none selected, and
+    /// none past the ends. With Shift a saved server swaps with its neighbour
+    /// (`OnlineServerEntry.keyPressed`) and stays selected. False when the screen
+    /// is not the list or has no entries.
+    pub fn arrow(&mut self, up: bool, shift: bool, size: (f32, f32), saves: &Path) -> bool {
+        let Self::List {
+            servers,
+            selected,
+            lan,
+            scroll,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let total = servers.len() + lan.games().len();
+        if total == 0 {
+            return false;
+        }
+        let next = match *selected {
+            Some(k) if shift => {
+                // A LAN game has no place to move to.
+                let to = if up { k.checked_sub(1) } else { Some(k + 1) };
+                if let Some(to) = to.filter(|&to| k < servers.len() && to < servers.len()) {
+                    servers.swap(k, to);
+                    save_servers(&servers_file(saves), servers);
+                    Some(to)
+                } else {
+                    Some(k)
+                }
+            }
+            Some(k) if up => Some(k.saturating_sub(1)),
+            Some(k) => Some((k + 1).min(total - 1)),
+            None if shift => None,
+            None => Some(if up { total - 1 } else { 0 }),
+        };
+        *selected = next;
+        if let Some(k) = next {
+            // scrollToEntry: the row, with the LAN header between the servers
+            // and the games, into view.
+            let row = if k < servers.len() { k } else { k + 1 };
+            let (top, bottom, _) = list_area(size.0.ceil(), size.1.ceil());
+            let content = content_height(servers.len(), lan.games().len());
+            let (row_top, view) = (2.0 + row as f32 * ROW_HEIGHT, bottom - top);
+            if row_top < scroll.amount {
+                scroll.amount = row_top;
+            } else if row_top + ROW_HEIGHT > scroll.amount + view {
+                scroll.amount = row_top + ROW_HEIGHT - view;
+            }
+            scroll.clamp(top, bottom, content);
+        }
+        true
+    }
     pub fn wheel(&mut self, delta: f32, cursor: (f32, f32), size: (f32, f32)) {
         if let Self::List {
             servers,
@@ -1667,10 +1838,12 @@ impl Screen {
     pub fn focused_box(&self, (w, _h): (f32, f32)) -> Option<[f32; 4]> {
         let y = match self {
             Self::Edit { focus: 0, .. } => 66.0,
-            Self::Edit { .. } => 106.0,
+            Self::Edit { focus: 1, .. } => 106.0,
+            Self::Edit { .. } => return None,
             Self::Direct { .. } => 116.0,
             Self::Friend { focus: 0, .. } => 64.0,
-            Self::Friend { .. } => 105.0,
+            Self::Friend { focus: 1, .. } => 105.0,
+            Self::Friend { .. } => return None,
             _ => return None,
         };
         Some([(w / 2.0).floor() - 100.0, y, 200.0, 20.0])
@@ -1682,11 +1855,20 @@ impl Screen {
                 address,
                 focus,
                 ..
-            } => Some(if *focus == 0 { name } else { address }),
+            } => match *focus {
+                0 => Some(name),
+                1 => Some(address),
+                // A button has the focus.
+                _ => None,
+            },
             Self::Direct { address } => Some(address),
             Self::Friend {
                 code, relay, focus, ..
-            } => Some(if *focus == 0 { code } else { relay }),
+            } => match *focus {
+                0 => Some(code),
+                1 => Some(relay),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1767,9 +1949,31 @@ impl Screen {
             128
         }
     }
-    pub fn tab(&mut self) {
-        if let Self::Edit { focus, .. } | Self::Friend { focus, .. } = self {
-            *focus = (*focus + 1) % 2;
+    /// Tab (`reverse`: Shift+Tab) through the focus order of `ManageServerScreen`
+    /// and the friend screen: the text fields, then the enabled `buttons`, then
+    /// round to the first field. `button` is the focused button, if any; a field
+    /// has the focus (`focus` below 2) only while no button does.
+    pub fn tab_dir(&mut self, reverse: bool, buttons: &[u8], button: &mut Option<u8>) {
+        let (Self::Edit { focus, .. } | Self::Friend { focus, .. }) = self else {
+            return;
+        };
+        let stops = 2 + buttons.len();
+        let at = match *button {
+            Some(id) => buttons.iter().position(|&b| b == id).map(|i| 2 + i),
+            None => Some(usize::from(*focus).min(1)),
+        }
+        .unwrap_or(0);
+        let next = if reverse {
+            (at + stops - 1) % stops
+        } else {
+            (at + 1) % stops
+        };
+        if next < 2 {
+            *focus = next as u8;
+            *button = None;
+        } else {
+            *focus = 2;
+            *button = Some(buttons[next - 2]);
         }
     }
     /// Escape: back to the list, or out of it (true).
@@ -1834,6 +2038,19 @@ pub fn wrap(text: &str, width: f32, atlas: &HudAtlas) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn servers_dat_is_beside_saves_or_in_the_player_dir() {
+        let saves = Path::new("/games/shared/saves");
+        assert_eq!(
+            servers_file_of(None, saves),
+            Path::new("/games/shared/servers.dat")
+        );
+        assert_eq!(
+            servers_file_of(Some(Path::new("/games/players/alex")), saves),
+            Path::new("/games/players/alex/servers.dat")
+        );
+    }
 
     #[test]
     fn only_discovered_entries_get_lan_authentication() {
@@ -2158,6 +2375,53 @@ mod tests {
     }
 
     #[test]
+    fn partner_servers_are_offered_once_below_the_official_server() {
+        let dir = std::env::temp_dir().join(format!("horizon-mp-partner-{}", std::process::id()));
+        let official = OFFICIAL_SERVER.1;
+        let (name, partner) = PARTNER_SERVERS[0];
+        let file = dir.join("servers.dat");
+        let ips = || -> Vec<String> { servers::load(&file).into_iter().map(|s| s.ip).collect() };
+        let fresh = |list: &[ServerEntry]| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            if !list.is_empty() {
+                servers::save(&file, list).unwrap();
+            }
+        };
+        // A first start: the official server on top, the partner just below it.
+        fresh(&[ServerEntry::new("Mine", "127.0.0.1:2")]);
+        add_official_server(&dir).unwrap();
+        add_partner_servers(&dir).unwrap();
+        assert_eq!(ips(), [official, partner, "127.0.0.1:2"]);
+        assert_eq!(servers::load(&file)[1].name, name);
+        // Once only.
+        add_partner_servers(&dir).unwrap();
+        assert_eq!(ips(), [official, partner, "127.0.0.1:2"]);
+        // A player who already had the official server moved it down: the partner follows it.
+        fresh(&[
+            ServerEntry::new("Mine", "127.0.0.1:2"),
+            ServerEntry::new("SMP", official),
+            ServerEntry::new("Last", "example.org"),
+        ]);
+        add_partner_servers(&dir).unwrap();
+        assert_eq!(ips(), ["127.0.0.1:2", official, partner, "example.org"]);
+        // No official server: last. Already listed in another spelling: not duplicated.
+        fresh(&[ServerEntry::new("Mine", "127.0.0.1:2")]);
+        add_partner_servers(&dir).unwrap();
+        assert_eq!(ips(), ["127.0.0.1:2", partner]);
+        fresh(&[ServerEntry::new("ZA", "Afri-Network.co.za:25565")]);
+        add_partner_servers(&dir).unwrap();
+        assert_eq!(ips(), ["Afri-Network.co.za:25565"]);
+        // Deleted by the player: never back.
+        fresh(&[]);
+        add_partner_servers(&dir).unwrap();
+        servers::save(&file, &[]).unwrap();
+        add_partner_servers(&dir).unwrap();
+        assert!(ips().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_moved_official_server_moves_the_old_entry_once() {
         let dir = std::env::temp_dir().join(format!("horizon-mp-moved-{}", std::process::id()));
         let address = OFFICIAL_SERVER.1;
@@ -2200,6 +2464,90 @@ mod tests {
         offered_before(&[ServerEntry::new("Test", "horizon.bunchy7s.dev:25570")]);
         add_official_server(&dir).unwrap();
         assert_eq!(ips(), ["horizon.bunchy7s.dev:25570"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrow_keys_select_servers_and_shift_moves_them() {
+        let dir = std::env::temp_dir().join(format!("horizon-mp-keys-{}", std::process::id()));
+        let saves = dir.join("saves");
+        std::fs::create_dir_all(&saves).unwrap();
+        let file = servers_file(&saves);
+        let list: Vec<ServerEntry> = ["a", "b", "c"]
+            .iter()
+            .map(|n| ServerEntry::new(n, "127.0.0.1:2"))
+            .collect();
+        servers::save(&file, &list).unwrap();
+        let mut screen = Screen::list(&saves);
+        let size = (427.0, 240.0);
+        let state = |screen: &Screen| match screen {
+            Screen::List {
+                servers, selected, ..
+            } => (
+                servers.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                *selected,
+            ),
+            _ => unreachable!(),
+        };
+        let abc = vec!["a".to_owned(), "b".into(), "c".into()];
+        // None selected: Down takes the first, as vanilla's nextEntry does.
+        assert!(screen.arrow(false, false, size, &saves));
+        assert_eq!(state(&screen), (abc.clone(), Some(0)));
+        // Up at the top stays; Down walks; the last stays.
+        screen.arrow(true, false, size, &saves);
+        assert_eq!(state(&screen).1, Some(0));
+        screen.arrow(false, false, size, &saves);
+        screen.arrow(false, false, size, &saves);
+        screen.arrow(false, false, size, &saves);
+        assert_eq!(state(&screen).1, Some(2));
+        // Shift+Up moves "c" above "b", keeps it selected and saves the order.
+        screen.arrow(true, true, size, &saves);
+        assert_eq!(
+            state(&screen),
+            (vec!["a".to_owned(), "c".into(), "b".into()], Some(1))
+        );
+        let saved: Vec<String> = servers::load(&file).into_iter().map(|s| s.name).collect();
+        assert_eq!(saved, ["a", "c", "b"]);
+        // Nothing moves past the first server.
+        screen.arrow(true, true, size, &saves);
+        screen.arrow(true, true, size, &saves);
+        assert_eq!(state(&screen).1, Some(0));
+        assert_eq!(state(&screen).0[0], "c");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enter_joins_the_selected_server() {
+        let dir = std::env::temp_dir().join(format!("horizon-mp-enter-{}", std::process::id()));
+        let saves = dir.join("saves");
+        std::fs::create_dir_all(&saves).unwrap();
+        let file = servers_file(&saves);
+        let list = vec![
+            ServerEntry::new("a", "127.0.0.1:2"),
+            ServerEntry::new("b", "127.0.0.1:3"),
+        ];
+        servers::save(&file, &list).unwrap();
+        let mut screen = Screen::list(&saves);
+        // Nothing selected: Enter joins nothing.
+        assert!(matches!(screen.confirm(), Outcome::None));
+        let size = (427.0, 240.0);
+        assert!(screen.arrow(false, false, size, &saves));
+        match screen.confirm() {
+            Outcome::Connect { address, lan } => {
+                assert_eq!(address, "127.0.0.1:2");
+                assert!(!lan);
+            }
+            _ => panic!("Enter did not join the selected server"),
+        }
+        // Down picks the next server, and Enter joins that one.
+        assert!(screen.arrow(false, false, size, &saves));
+        match screen.confirm() {
+            Outcome::Connect { address, lan } => {
+                assert_eq!(address, "127.0.0.1:3");
+                assert!(!lan);
+            }
+            _ => panic!("Enter did not join the second server"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

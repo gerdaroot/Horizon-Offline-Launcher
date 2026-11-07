@@ -11,13 +11,14 @@ use horizon_assets::{
     model::{Direction, Material},
 };
 use horizon_client::{
-    block_entity_render::{diffuse, diffuse_lights, vertex_light},
-    containers::{BlockEntity, ModBlockEntity},
+    block_entity_render::{TextCall, diffuse, diffuse_lights, text_vertices, vertex_light},
+    containers::{BlockEntity, ModRevision},
     fast_hash::FxHashMap,
     gfx::Cull,
     hud::Rect,
     items::ItemStack,
     mesher::Vertex,
+    text::Text,
 };
 use horizon_world::registry::BlockStateId;
 
@@ -43,7 +44,6 @@ fn in_frustum(frustum: Option<&impl Cull>, origin: Vec3, bounds: [f32; 6]) -> bo
 /// partial tick, game time and light, and the pose stack the helpers draw
 /// under (`native_draw_quad`, `native_draw_cube`, `native_draw_block`).
 // Native mods read and drive it; nothing in Horizon does.
-#[allow(dead_code)]
 pub struct BlockEntityDraw {
     /// The frame's partial tick, 0 to 1 (`BlockEntityRenderState`).
     pub partial: f32,
@@ -59,10 +59,112 @@ pub struct BlockEntityDraw {
     lights: (Vec3, Vec3),
     vertices: Vec<Vertex>,
     kept: bool,
+    /// Where each turning part starts in `vertices` (`spin`), and where the
+    /// parts standing still start again (`still`, none).
+    spins: Vec<(usize, Option<Spin>)>,
+}
+
+/// A part of a block entity's frame that turns by itself (`BlockEntityDraw::spin`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Spin {
+    axis: Vec3,
+    pivot: Vec3,
+    degrees_per_tick: f32,
+    phase: f32,
+}
+
+impl Spin {
+    /// The turn at `game_time` plus `partial`, about the pivot, in the
+    /// block's coordinates. Counted in f64: a world's game time has more
+    /// ticks than an f32 holds exactly.
+    fn turn(&self, game_time: i64, partial: f32) -> Mat4 {
+        let t = game_time as f64 + f64::from(partial);
+        let degrees =
+            (t * f64::from(self.degrees_per_tick) + f64::from(self.phase)).rem_euclid(360.0);
+        Mat4::from_translation(self.pivot)
+            * Mat4::from_quat(Quat::from_axis_angle(
+                self.axis,
+                (degrees as f32).to_radians(),
+            ))
+            * Mat4::from_translation(-self.pivot)
+    }
+}
+
+/// `vertices`, drawn relative to the block, moved to the camera by `origin`
+/// and each part of `spins` (starts relative to `vertices`) turned as it is
+/// at `game_time` plus `partial`, onto `out`.
+pub(super) fn place_turning(
+    vertices: &[Vertex],
+    spins: &[(usize, Option<Spin>)],
+    game_time: i64,
+    partial: f32,
+    origin: Vec3,
+    out: &mut Vec<Vertex>,
+) {
+    let mut turn: Option<Mat4> = None;
+    let mut next = spins.iter().peekable();
+    for (i, v) in vertices.iter().enumerate() {
+        while let Some((start, spin)) = next.next_if(|(start, _)| *start <= i) {
+            let _ = start;
+            turn = spin.map(|s| s.turn(game_time, partial));
+        }
+        let mut v = *v;
+        if let Some(m) = turn {
+            v.pos = m.transform_point3(Vec3::from_array(v.pos)).to_array();
+            if v.normal[3] != 0 {
+                let n = Vec3::new(
+                    f32::from(v.normal[0]),
+                    f32::from(v.normal[1]),
+                    f32::from(v.normal[2]),
+                );
+                let n = m.transform_vector3(n);
+                v.normal = [
+                    n.x.round().clamp(-127.0, 127.0) as i8,
+                    n.y.round().clamp(-127.0, 127.0) as i8,
+                    n.z.round().clamp(-127.0, 127.0) as i8,
+                    v.normal[3],
+                ];
+            }
+        }
+        v.pos = (Vec3::from_array(v.pos) + origin).to_array();
+        out.push(v);
+    }
 }
 
 #[allow(dead_code)]
 impl BlockEntityDraw {
+    /// A frame drawn from `pose` (relative to the camera), lit by `light` and
+    /// `lights`, adding to `vertices`; `block` is where `native_draw_item`'s
+    /// owner stands. A mob's frame (`native_mob_submit`) is made this way.
+    pub(super) fn posed(
+        partial: f32,
+        game_time: i64,
+        light: u32,
+        block: [i32; 3],
+        pose: Mat4,
+        lights: (Vec3, Vec3),
+        vertices: Vec<Vertex>,
+    ) -> Self {
+        Self {
+            partial,
+            game_time,
+            light,
+            block,
+            poses: vec![pose],
+            lights,
+            vertices,
+            kept: false,
+            spins: Vec::new(),
+        }
+    }
+    /// The vertices drawn, with those it was made with first.
+    pub(super) fn into_vertices(self) -> Vec<Vertex> {
+        self.vertices
+    }
+    /// The vertices drawn and where its turning parts start in them (`spin`).
+    pub(super) fn into_turning(self) -> (Vec<Vertex>, Vec<(usize, Option<Spin>)>) {
+        (self.vertices, self.spins)
+    }
     /// `PoseStack.pushPose`: `pop` comes back to the pose as it is now.
     pub fn push(&mut self) {
         let pose = self.pose();
@@ -100,20 +202,57 @@ impl BlockEntityDraw {
     /// its block entity (what the server sent), its light or the resource
     /// packs change. Call it only when what you drew reads none of
     /// `partial`, `game_time`, the blocks around it or anything else of
-    /// yours, and moves nothing by itself: an idle machine, not a turning
-    /// shaft. Kept geometry stands still: an enchanted item's glint, and an
+    /// yours, and moves nothing by itself but through `spin`: an idle machine,
+    /// or a shaft turning at a steady speed, not one whose speed changes from
+    /// frame to frame. Kept geometry stands still: an enchanted item's glint, and an
     /// item drawn with `native_draw_item` whose model reads the time (a clock,
-    /// a compass), stop where they were. API @API:block_entity_keep@.
+    /// a compass), stop where they were. API 94.
     pub fn keep(&mut self) {
         self.kept = true;
+    }
+    /// What is drawn next turns by itself: `degrees_per_tick` degrees each
+    /// game tick (a shaft at `rpm` turns `rpm * 0.3`, as Create's do), about
+    /// `axis` through `pivot`, both in blocks from the block's corner
+    /// whatever the pose, counterclockwise seen from the axis' positive end,
+    /// `phase` degrees round at game time 0 (to mesh a cog with its
+    /// neighbour's). Draw the part at rest; the game turns it each frame from
+    /// the game time and the partial tick. With `keep` it goes on turning
+    /// with no call of `native_block_entity_submit` until what it was drawn
+    /// with changes: send a new speed in the update tag and the block is
+    /// drawn again (Flywheel's rotating instances, done on the CPU). The
+    /// angle is `game_time * degrees_per_tick + phase`, not a sum of turns:
+    /// with a new speed, pass the phase that keeps the part where it was
+    /// (`old_angle - game_time * new_speed`), or it jumps. Until
+    /// `still` or the next `spin`. A block entity's frame only: a mob's
+    /// (`native_mob_submit`) draws it at rest. API @API:spinning_geometry@.
+    pub fn spin(&mut self, axis: [f32; 3], pivot: [f32; 3], degrees_per_tick: f32, phase: f32) {
+        let spin = Spin {
+            axis: Vec3::from_array(axis).normalize_or(Vec3::Y),
+            pivot: Vec3::from_array(pivot),
+            degrees_per_tick: if degrees_per_tick.is_finite() {
+                degrees_per_tick
+            } else {
+                0.0
+            },
+            phase: if phase.is_finite() { phase } else { 0.0 },
+        };
+        self.spins.push((self.vertices.len(), Some(spin)));
+    }
+    /// What is drawn next stands still again, after `spin`.
+    /// API @API:spinning_geometry@.
+    pub fn still(&mut self) {
+        self.spins.push((self.vertices.len(), None));
     }
     fn apply(&mut self, m: Mat4) {
         if let Some(pose) = self.poses.last_mut() {
             *pose *= m;
         }
     }
-    fn pose(&self) -> Mat4 {
+    pub(super) fn pose(&self) -> Mat4 {
         self.poses.last().copied().unwrap_or(Mat4::IDENTITY)
+    }
+    pub(super) fn vertices_mut(&mut self) -> &mut Vec<Vertex> {
+        &mut self.vertices
     }
     /// A quad of `corners` (blocks, under the pose) with unit UVs, shaded as
     /// vanilla's block entity models are (`Lighting`'s two lights).
@@ -147,7 +286,6 @@ impl BlockEntityDraw {
 /// One face of a `native_draw_cube` box: its sprite (`mymod:entity/cog`,
 /// `mymod:block/casing`) and its UVs in texels of 16 per side, as a model
 /// face's `uv` (none takes the box's own, as a model's default).
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct CubeFace<'a> {
     pub sprite: &'a str,
@@ -170,16 +308,23 @@ struct KeptKey {
     dim: Dim,
     state: u32,
     light: u32,
+    /// `Font::epoch` when it was drawn: a cache reset moves glyphs in the
+    /// atlas, so text a mod kept (`native_draw_text`) is drawn again, as a
+    /// sign's kept text is.
+    glyphs: u64,
 }
 
 struct KeptEntry {
     key: KeptKey,
-    entity: ModBlockEntity,
+    /// Of the block entity it was drawn from: equal, nothing changed it.
+    revision: ModRevision,
     bounds: [f32; 6],
     /// Game time it was last drawn.
     used: i64,
     /// Relative to the block's corner.
     vertices: Vec<Vertex>,
+    /// Its turning parts (`BlockEntityDraw::spin`), from the start of `vertices`.
+    spins: Vec<(usize, Option<Spin>)>,
 }
 
 /// Geometry mods kept (`BlockEntityDraw::keep`), by position. As
@@ -201,19 +346,19 @@ impl KeptGeometry {
                 .retain(|_, e| (now - KEPT_FOR..=now).contains(&e.used));
         }
     }
-    /// What is kept at `pos` when it was drawn with `key` and `entity`,
-    /// marked drawn at `now`.
+    /// What is kept at `pos` when it was drawn with `key` and its block
+    /// entity at `revision`, marked drawn at `now`.
     fn get(
         &mut self,
         pos: [i32; 3],
         key: KeptKey,
-        entity: &ModBlockEntity,
+        revision: ModRevision,
         now: i64,
     ) -> Option<&KeptEntry> {
         let entry = self
             .entries
             .get_mut(&pos)
-            .filter(|e| e.key == key && e.entity == *entity)?;
+            .filter(|e| e.key == key && e.revision == revision)?;
         entry.used = now;
         Some(entry)
     }
@@ -221,9 +366,10 @@ impl KeptGeometry {
         &mut self,
         pos: [i32; 3],
         key: KeptKey,
-        entity: &ModBlockEntity,
+        revision: ModRevision,
         bounds: [f32; 6],
         vertices: &[Vertex],
+        spins: Vec<(usize, Option<Spin>)>,
         now: i64,
     ) {
         let mut kept = self
@@ -236,10 +382,11 @@ impl KeptGeometry {
             pos,
             KeptEntry {
                 key,
-                entity: entity.clone(),
+                revision,
                 bounds,
                 used: now,
                 vertices: kept,
+                spins,
             },
         );
     }
@@ -253,11 +400,25 @@ impl KeptGeometry {
 }
 
 impl Game<'_> {
+    /// The mod block entities within view distance of `camera` whose block's
+    /// template has none, which the mesher's block entity lists (made from
+    /// the template) leave out: where they are and their block's state, for
+    /// `mod_block_entity_geometry`. From the per-chunk list of
+    /// `BlockEntities::mods_near`, not a scan of every block entity.
+    pub(super) fn untemplated_mod_block_entities(&self, camera: DVec3) -> Vec<([i32; 3], u32)> {
+        self.world
+            .block_entities
+            .mods_near(camera.x, camera.z, VIEW_DISTANCE)
+            .map(|p| ([p.0, p.1, p.2], self.world.block(p.0, p.1, p.2).0))
+            .filter(|&(_, state)| !self.res.facts().get(BlockStateId(state)).block_entity)
+            .collect()
+    }
     /// `native_block_entity_submit` for each of `blocks` (in drawn sections,
     /// drawn by no vanilla renderer) whose block entity is a mod's, closer than
     /// `BlockEntityRenderer.getViewDistance` to the camera (`shouldRender`)
     /// and with its bounds (`native_block_entity_render_bounding_box`) in the
-    /// frustum.
+    /// frustum. Entity occlusion culling is for ordinary entities; block
+    /// entities use these renderer-provided bounds instead.
     pub(super) fn mod_block_entity_geometry<'a>(
         &self,
         blocks: impl Iterator<Item = &'a ([i32; 3], u32)>,
@@ -274,6 +435,7 @@ impl Game<'_> {
             lights: diffuse_lights(self.dim == Dim::Nether),
             vertices: std::mem::take(out),
             kept: false,
+            spins: Vec::new(),
         };
         let now = self.world.game_time;
         let mut kept = self.kept_block_entities.borrow_mut();
@@ -295,16 +457,27 @@ impl Game<'_> {
                 dim: self.dim,
                 state,
                 light,
+                glyphs: self.gui.atlas.font.epoch(),
             };
-            if let Some(entry) = kept.get(pos, key, entity, now) {
+            if let Some(entry) = kept.get(pos, key, entity.revision(), now) {
                 if in_frustum(self.view_frustum.as_ref(), origin, entry.bounds) {
                     let start = draw.vertices.len();
                     self.mark_block_entity(start, state);
-                    draw.vertices.extend(entry.vertices.iter().map(|v| Vertex {
-                        pos: (Vec3::from_array(v.pos) + origin).to_array(),
-                        ..*v
-                    }));
-                    self.cull_entity_vertices(&mut draw.vertices, start);
+                    if entry.spins.is_empty() {
+                        draw.vertices.extend(entry.vertices.iter().map(|v| Vertex {
+                            pos: (Vec3::from_array(v.pos) + origin).to_array(),
+                            ..*v
+                        }));
+                    } else {
+                        place_turning(
+                            &entry.vertices,
+                            &entry.spins,
+                            draw.game_time,
+                            draw.partial,
+                            origin,
+                            &mut draw.vertices,
+                        );
+                    }
                 }
                 continue;
             }
@@ -324,16 +497,42 @@ impl Game<'_> {
             draw.poses.push(Mat4::IDENTITY);
             draw.light = light;
             draw.kept = false;
+            draw.spins.clear();
             self.native_block_entity_submit(pos, block, id, entity, &mut draw);
+            // The turning parts, from the start of this block's vertices.
+            let spins: Vec<(usize, Option<Spin>)> = draw
+                .spins
+                .drain(..)
+                .map(|(at, spin)| (at.saturating_sub(start), spin))
+                .collect();
             if draw.kept {
-                kept.keep(pos, key, entity, bounds, &draw.vertices[start..], now);
+                kept.keep(
+                    pos,
+                    key,
+                    entity.revision(),
+                    bounds,
+                    &draw.vertices[start..],
+                    spins.clone(),
+                    now,
+                );
             } else {
                 kept.forget(pos);
             }
-            for v in &mut draw.vertices[start..] {
-                v.pos = (Vec3::from_array(v.pos) + origin).to_array();
+            if spins.is_empty() {
+                for v in &mut draw.vertices[start..] {
+                    v.pos = (Vec3::from_array(v.pos) + origin).to_array();
+                }
+            } else {
+                let drawn = draw.vertices.split_off(start);
+                place_turning(
+                    &drawn,
+                    &spins,
+                    draw.game_time,
+                    draw.partial,
+                    origin,
+                    &mut draw.vertices,
+                );
             }
-            self.cull_entity_vertices(&mut draw.vertices, start);
         }
         *out = draw.vertices;
     }
@@ -368,6 +567,51 @@ impl Game<'_> {
             tint,
         );
         true
+    }
+
+    /// Draws `text` under `draw`'s pose as a sign draws its lines
+    /// (`Font.drawInBatch` in a `BlockEntityRenderer`): in the pose's x-y
+    /// plane, one unit a font pixel, y down, its left end at `at`, facing
+    /// +z. Scale the pose first as a sign does (`draw.scale([1.0 / 64.0,
+    /// -1.0 / 64.0, 1.0 / 64.0])` for its letters, 8 pixels high). Each span
+    /// is drawn in its own colour, the others in the 0xRRGGBB `color`;
+    /// `glowing` text is full bright (a glow ink sac's), the rest lit by
+    /// `draw.light`; a nonzero 0xRRGGBB `outline` rings each glyph, as glowing
+    /// sign text's. Returns the width drawn, in font pixels: centre a line
+    /// by starting it at minus half its width. API @API:draw_text@.
+    pub(super) fn native_draw_text(
+        &self,
+        draw: &mut BlockEntityDraw,
+        text: &Text,
+        at: [f32; 2],
+        color: u32,
+        glowing: bool,
+        outline: u32,
+    ) -> f32 {
+        let glyph = |c: char| self.gui.atlas.glyph_cell(c);
+        let light = if glowing { 240 | 240 << 8 } else { draw.light };
+        let matrix = draw.pose();
+        let mut x = at[0];
+        for span in &text.spans {
+            let shown = horizon_client::bidi::visual_str(&span.text).into_owned();
+            let width: f32 = shown.chars().map(|c| glyph(c).advance).sum();
+            let call = TextCall {
+                matrix,
+                x,
+                y: at[1],
+                text: shown,
+                color: 0xFF00_0000 | (span.style.color.unwrap_or(color) & 0xFF_FFFF),
+                outline: if outline == 0 {
+                    0
+                } else {
+                    0xFF00_0000 | (outline & 0xFF_FFFF)
+                },
+                light,
+            };
+            text_vertices(&glyph, &call, &mut draw.vertices);
+            x += width;
+        }
+        x - at[0]
     }
 
     /// Draws a box from `from` to `to` (texels of 16 per block, as a block
@@ -407,8 +651,8 @@ impl Game<'_> {
     /// the state with `properties` (`[("axis", "x")]`, the rest default)
     /// under `draw`'s pose, as vanilla's `submitBlockModel` draws a block in
     /// an entity's place: a block's baked model, with its default tints. A
-    /// moving part is often a block of the mod's own, never placed. False for
-    /// an unknown block or property. API 71.
+    /// moving part that is no block is a standalone model
+    /// (`native_draw_model`). False for an unknown block or property. API 71.
     pub(super) fn native_draw_block(
         &self,
         draw: &mut BlockEntityDraw,
@@ -437,6 +681,30 @@ impl Game<'_> {
         true
     }
 
+    /// Draws standalone model `model` (`mymod:block/shaft_half`, one a mod
+    /// named in `native_standalone_models`) under `draw`'s pose, as
+    /// `native_draw_block` draws a block's: unturned, from the block's lower
+    /// north-west corner, lit by `draw.light`. Its faces with a tint index
+    /// are multiplied by the 0xRRGGBB `tint` (0xFFFFFF for none), the
+    /// others drawn as they are. False when the model isn't baked: not
+    /// named, missing from the resources, or on a side that draws nothing.
+    /// API 151.
+    pub(super) fn native_draw_model(
+        &self,
+        draw: &mut BlockEntityDraw,
+        model: &str,
+        tint: u32,
+    ) -> bool {
+        let Some(baked) = self.pack.render.model_catalog.standalone(model) else {
+            return false;
+        };
+        let pose = draw.pose();
+        let light = draw.light;
+        let tint = |index: i32| (index >= 0).then_some(tint & 0xFF_FFFF);
+        self.baked_model_vertices([baked], pose, |_| light, true, tint, &mut draw.vertices);
+        true
+    }
+
     /// Draws `stack` under `draw`'s pose as an item is drawn in the world
     /// (`ItemModelResolver.updateForTopItem` and `ItemStackRenderState.submit`), centred on the
     /// pose's origin, in its model's `display` transform: `Fixed` as a
@@ -450,7 +718,7 @@ impl Game<'_> {
     /// client's copy of a block entity has no item slots (`entity.items` is
     /// empty there): send the stacks you draw in
     /// `native_block_entity_update_tag` and read them from `entity.nbt`.
-    /// API @API:block_entity_draw_item@.
+    /// API 91.
     pub(super) fn native_draw_item(
         &self,
         draw: &mut BlockEntityDraw,
@@ -473,7 +741,7 @@ impl Game<'_> {
 
     /// Property `key` of block state `state` (a machine's `facing`, from the
     /// `state` `native_block_entity_submit` gets), if it has one: no lookup in
-    /// the world, so cheap each frame. API @API:block_entity_draw_item@.
+    /// the world, so cheap each frame. API 91.
     pub(super) fn native_block_state_property(
         &self,
         state: BlockStateId,
@@ -487,11 +755,17 @@ impl Game<'_> {
             .get(key)
             .map(String::as_str)
     }
+    /// The block `state` is a state of: its name, as `GameLevel`'s helper of
+    /// the same name gives it for the hooks that get a state in the world.
+    pub(super) fn native_state_block(&self, state: BlockStateId) -> Option<&str> {
+        self.pack.assets.registry.state(state).map(|s| &*s.name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_client::containers::{ModBlockEntity, ModBlockEntityFields};
 
     fn draw() -> BlockEntityDraw {
         BlockEntityDraw {
@@ -503,6 +777,7 @@ mod tests {
             lights: diffuse_lights(false),
             vertices: Vec::new(),
             kept: false,
+            spins: Vec::new(),
         }
     }
 
@@ -588,12 +863,12 @@ mod tests {
         assert_eq!(shaded(0x10_20_30, 1.0), 0xFF_30_20_10);
     }
 
-    fn machine(progress: i32) -> ModBlockEntity {
-        ModBlockEntity {
+    fn machine() -> ModRevision {
+        ModBlockEntity::new(ModBlockEntityFields {
             id: "mymod:machine".into(),
-            data: vec![progress],
             ..Default::default()
-        }
+        })
+        .revision()
     }
 
     fn vertex(x: f32) -> Vertex {
@@ -607,20 +882,85 @@ mod tests {
         dim: Dim::Overworld,
         state: 7,
         light: 0xF0F0,
+        glyphs: 0,
     };
+
+    /// A part drawn after `spin` turns about its pivot by the game time and
+    /// partial tick (90 degrees a tick about +y takes +x to -z, by the right
+    /// hand), its normal with it; what is drawn after `still` and before the
+    /// spin stays; all of it is moved by the origin.
+    #[test]
+    fn a_spinning_part_turns_with_the_game_time_and_the_rest_stays() {
+        let mut draw = draw();
+        let at = |x: f32, y: f32, z: f32, normal: [i8; 4]| Vertex {
+            pos: [x, y, z],
+            normal,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        draw.vertices.push(at(1.0, 0.5, 0.5, [0; 4]));
+        draw.spin([0.0, 1.0, 0.0], [0.5, 0.5, 0.5], 90.0, 0.0);
+        draw.vertices.push(at(1.0, 0.5, 0.5, [127, 0, 0, 127]));
+        draw.still();
+        draw.vertices.push(at(0.0, 0.0, 0.0, [0; 4]));
+        let origin = Vec3::new(10.0, 0.0, 0.0);
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-4);
+        // A tick and a half: 135 degrees.
+        let mut out = Vec::new();
+        place_turning(&draw.vertices, &draw.spins, 1, 0.5, origin, &mut out);
+        assert!(close(out[0].pos, [11.0, 0.5, 0.5]), "{:?}", out[0].pos);
+        let h = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            close(out[1].pos, [10.5 - h, 0.5, 0.5 - h]),
+            "{:?}",
+            out[1].pos
+        );
+        assert!(close(out[2].pos, [10.0, 0.0, 0.0]), "{:?}", out[2].pos);
+        // One tick: a quarter turn, +x to -z, the normal along.
+        out.clear();
+        place_turning(&draw.vertices, &draw.spins, 1, 0.0, origin, &mut out);
+        assert!(close(out[1].pos, [10.5, 0.5, 0.0]), "{:?}", out[1].pos);
+        assert_eq!(out[1].normal, [0, 0, -127, 127]);
+        // Four ticks: all the way round, and a world's late game time is no
+        // less exact.
+        out.clear();
+        place_turning(
+            &draw.vertices,
+            &draw.spins,
+            4_000_000_000,
+            0.0,
+            origin,
+            &mut out,
+        );
+        assert!(close(out[1].pos, [11.0, 0.5, 0.5]), "{:?}", out[1].pos);
+    }
 
     #[test]
     fn kept_geometry_is_drawn_again_until_what_it_was_drawn_with_changes() {
         let mut kept = KeptGeometry::default();
         let pos = [1, 2, 3];
-        kept.keep(pos, KEY, &machine(0), DEFAULT_BOUNDS, &[vertex(0.5)], 0);
-        let entry = kept.get(pos, KEY, &machine(0), 1).expect("kept");
+        let mut entity = ModBlockEntity::new(ModBlockEntityFields {
+            id: "mymod:machine".into(),
+            data: vec![0],
+            ..Default::default()
+        });
+        let drawn = entity.revision();
+        kept.keep(
+            pos,
+            KEY,
+            drawn,
+            DEFAULT_BOUNDS,
+            &[vertex(0.5)],
+            Vec::new(),
+            0,
+        );
+        let entry = kept.get(pos, KEY, entity.revision(), 1).expect("kept");
         assert_eq!(entry.vertices.len(), 1);
         assert_eq!(entry.vertices[0].pos, [0.5, 0.0, 0.0]);
         assert_eq!(entry.bounds, DEFAULT_BOUNDS);
         // New data from the server, another state, light or dimension, or
         // another position: none of them is the kept geometry.
-        assert!(kept.get(pos, KEY, &machine(1), 1).is_none());
+        entity.data[0] = 1;
+        assert!(kept.get(pos, KEY, entity.revision(), 1).is_none());
         for changed in [
             KeptKey { state: 8, ..KEY },
             KeptKey {
@@ -631,37 +971,56 @@ mod tests {
                 dim: Dim::Nether,
                 ..KEY
             },
+            KeptKey { glyphs: 1, ..KEY },
         ] {
-            assert!(kept.get(pos, changed, &machine(0), 1).is_none());
+            assert!(kept.get(pos, changed, drawn, 1).is_none());
         }
-        assert!(kept.get([1, 2, 4], KEY, &machine(0), 1).is_none());
+        assert!(kept.get([1, 2, 4], KEY, drawn, 1).is_none());
+        // Another block entity in its place, as the old one was: not it.
+        let replaced = ModBlockEntity::new(ModBlockEntityFields {
+            id: "mymod:machine".into(),
+            data: vec![0],
+            ..Default::default()
+        });
+        assert!(kept.get(pos, KEY, replaced.revision(), 1).is_none());
         // Drawn again and kept with the new data, it replaces the old.
-        kept.keep(pos, KEY, &machine(1), DEFAULT_BOUNDS, &[vertex(0.25)], 2);
-        assert!(kept.get(pos, KEY, &machine(0), 2).is_none());
-        let entry = kept.get(pos, KEY, &machine(1), 2).expect("kept again");
+        kept.keep(
+            pos,
+            KEY,
+            entity.revision(),
+            DEFAULT_BOUNDS,
+            &[vertex(0.25)],
+            Vec::new(),
+            2,
+        );
+        assert!(kept.get(pos, KEY, drawn, 2).is_none());
+        let entry = kept
+            .get(pos, KEY, entity.revision(), 2)
+            .expect("kept again");
         assert_eq!(entry.vertices[0].pos, [0.25, 0.0, 0.0]);
         // Drawn without keeping: forgotten.
         kept.forget(pos);
-        assert!(kept.get(pos, KEY, &machine(1), 3).is_none());
+        assert!(kept.get(pos, KEY, entity.revision(), 3).is_none());
     }
 
     #[test]
     fn kept_geometry_out_of_view_for_its_ticks_is_swept() {
         let mut kept = KeptGeometry::default();
         let (seen, gone) = ([0, 0, 0], [5, 0, 0]);
-        kept.keep(seen, KEY, &machine(0), DEFAULT_BOUNDS, &[vertex(0.0)], 0);
-        kept.keep(gone, KEY, &machine(0), DEFAULT_BOUNDS, &[vertex(0.0)], 0);
-        kept.get(gone, KEY, &machine(0), 50);
+        let m = machine();
+        kept.keep(seen, KEY, m, DEFAULT_BOUNDS, &[vertex(0.0)], Vec::new(), 0);
+        kept.keep(gone, KEY, m, DEFAULT_BOUNDS, &[vertex(0.0)], Vec::new(), 0);
+        kept.get(gone, KEY, m, 50);
         // A sweep at 100 keeps both: each was drawn in the last 100 ticks.
         kept.sweep(100);
         assert!(kept.entries.contains_key(&gone));
         assert!(kept.entries.contains_key(&seen));
-        kept.get(seen, KEY, &machine(0), 150);
+        kept.get(seen, KEY, m, 150);
         // At 199 no sweep is due yet; at 200 the one last drawn at 50 goes.
         kept.sweep(199);
         assert!(kept.entries.contains_key(&gone));
         kept.sweep(200);
         assert!(!kept.entries.contains_key(&gone));
-        assert!(kept.get(seen, KEY, &machine(0), 200).is_some());
+        assert!(kept.get(seen, KEY, m, 200).is_some());
     }
 }

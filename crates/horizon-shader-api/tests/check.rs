@@ -1,6 +1,6 @@
 //! `check`: the sample pack passes, and each kind of mistake is reported
 //! with the pack's own file and line.
-use horizon_shader_api::{MANIFEST, Pack, Problem, check};
+use horizon_shader_api::{MANIFEST, Pack, Problem, StageKind, check};
 use std::path::Path;
 
 fn sample() -> Pack {
@@ -91,6 +91,31 @@ fn a_pack_declares_no_bindings_entry_points_or_horizon_names() {
         GRADE,
         &format!("{body}fn horizon_mine() {{}}\n"),
         "`horizon_mine`: names starting with horizon_",
+    );
+}
+
+#[test]
+fn the_options_sizing_the_shadow_map_need_no_override() {
+    let manifest = |keys: &str| {
+        let text = String::from_utf8(sample().files[MANIFEST].clone()).unwrap();
+        let text = text.replace("distance = 96.0", &format!("distance = 96.0\n{keys}"));
+        format!(
+            "{text}\n[[options]]\nid = \"shadow_size\"\nname = \"Size\"\ntype = \"choice\"\n\
+             values = [\"1024\", \"2048\"]\ndefault = \"1024\"\n"
+        )
+    };
+    let mut files = sample().files;
+    files.insert(
+        MANIFEST.into(),
+        manifest("resolution_option = \"shadow_size\"\n").into_bytes(),
+    );
+    let report = check(&Pack::from_files(files).unwrap()).unwrap();
+    let shadow = report.shadow.unwrap();
+    assert_eq!(shadow.resolution_option.as_deref(), Some("shadow_size"));
+    one(
+        MANIFEST,
+        &manifest(""),
+        "option \"shadow_size\": no stage declares `override shadow_size: u32`",
     );
 }
 
@@ -191,4 +216,105 @@ fn a_stages_files_are_its_own() {
     assert!(other.parts.iter().all(|p| p.0 != "only_post.wgsl"));
     assert!(pack.manifest.files().contains(&"only_post.wgsl"));
     check(&pack).unwrap();
+}
+
+#[test]
+fn a_vertex_stage_checks_alone_and_joins_the_material() {
+    let mut files = sample().files;
+    let manifest = String::from_utf8(files[MANIFEST].clone()).unwrap();
+    files.insert(
+        MANIFEST.into(),
+        format!("{manifest}\n[vertex]\nfile = \"wave.wgsl\"\n").into_bytes(),
+    );
+    files.insert(
+        "wave.wgsl".into(),
+        b"fn vertex(input: VertexInput) -> vec3<f32> {
+    return input.position + vec3(0.0, sin(frame.time) * f32(input.material), 0.0);
+}
+"
+        .to_vec(),
+    );
+    let report = check(&Pack::from_files(files).unwrap()).unwrap();
+    let source = |kind| {
+        let stage = report.stages.iter().find(|s| s.kind == kind).unwrap();
+        stage.source.contains("fn vertex(input: VertexInput)")
+    };
+    assert!(source(StageKind::Vertex));
+    assert!(source(StageKind::Material));
+}
+
+#[test]
+fn a_material_reads_its_block_texture() {
+    let mut files = sample().files;
+    let pack = Pack::from_files(files.clone()).unwrap();
+    let file = pack.manifest.material.as_ref().unwrap().file.clone();
+    files.insert(
+        file,
+        b"override reflections: bool = true;
+fn material(input: MaterialInput) -> Surface {
+    let lod = block_texture_lod() + block_texture_size().x;
+    return Surface(block_texture(input.uv) + block_texture_level(input.uv, lod));
+}
+"
+        .to_vec(),
+    );
+    check(&Pack::from_files(files).unwrap()).unwrap();
+}
+
+#[test]
+fn only_a_material_that_calls_set_surface_needs_its_target() {
+    let calls = |pack: &Pack| {
+        let report = check(pack).unwrap();
+        let material = report.stages.iter().find(|s| s.kind == StageKind::Material);
+        horizon_shader_api::stages::calls_set_surface(&material.unwrap().source)
+    };
+    let mut files = sample().files;
+    let pack = Pack::from_files(files.clone()).unwrap();
+    assert!(!calls(&pack));
+    let material = pack.manifest.material.as_ref().unwrap().file.clone();
+    files.insert(
+        material,
+        b"override reflections: bool = true;
+fn material(input: MaterialInput) -> Surface {
+    set_surface(input.normal, 0.5, 7.0);
+    return Surface(input.albedo);
+}
+"
+        .to_vec(),
+    );
+    assert!(calls(&Pack::from_files(files).unwrap()));
+}
+
+/// The sample with `[displacement]` added to its manifest and `material.wgsl` replaced.
+fn displaced(material: &str) -> Result<horizon_shader_api::Report, Vec<Problem>> {
+    let mut files = sample().files;
+    let manifest = String::from_utf8(files[MANIFEST].clone()).unwrap() + "\n[displacement]\n";
+    files.insert(MANIFEST.into(), manifest.into_bytes());
+    let own = String::from_utf8(files["material.wgsl"].clone()).unwrap() + material;
+    files.insert("material.wgsl".into(), own.into_bytes());
+    check(&Pack::from_files(files).unwrap())
+}
+
+#[test]
+fn displacement_is_checked_with_its_signature() {
+    // Depth below the face by the LabPBR height: 1/8 of a block at the bottom of the relief.
+    let good = "fn displacement(input: DisplacementInput) -> f32 { return (1.0 - input.height) * 0.125; }\n";
+    assert!(displaced(good).is_ok(), "{:#?}", displaced(good).err());
+    let missing = displaced("").expect_err("should fail");
+    assert!(
+        missing.iter().any(|p| p
+            .message
+            .contains("defines no `fn displacement(input: DisplacementInput) -> f32`")),
+        "{missing:#?}"
+    );
+    let wrong = displaced(
+        "fn displacement(input: DisplacementInput) -> vec3<f32> { return input.normal; }\n",
+    )
+    .expect_err("should fail");
+    assert!(
+        wrong.iter().any(|p| p
+            .message
+            .contains("`fn displacement(DisplacementInput) -> vec3<f32>` should be")),
+        "{wrong:#?}"
+    );
 }

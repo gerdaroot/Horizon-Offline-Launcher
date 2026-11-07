@@ -7,21 +7,21 @@ use horizon_launcher::screenshots::{self, Shot};
 use std::path::PathBuf;
 
 /// Thumbnails shown before "Show all".
-const FIRST: usize = 8;
+pub(super) const FIRST: usize = 8;
 const THUMB_W: f32 = 196.;
 const THUMB_H: f32 = THUMB_W * 9. / 16.;
 
 #[derive(Default)]
 pub(super) struct Screenshots {
     home: Option<PathBuf>,
-    list: Vec<Shot>,
+    pub(super) list: Vec<Shot>,
     fresh: bool,
-    all: bool,
+    pub(super) all: bool,
     /// The picture open in the viewer, by its place in `list`.
-    viewing: Option<usize>,
-    confirm_delete: bool,
+    pub(super) viewing: Option<usize>,
+    pub(super) confirm_delete: bool,
     /// What the last action did, or why it failed.
-    note: Option<Result<String, String>>,
+    pub(super) note: Option<Result<String, String>>,
 }
 
 impl Screenshots {
@@ -32,7 +32,7 @@ impl Screenshots {
 }
 
 impl Launcher {
-    fn load_screenshots(&mut self, home: PathBuf) {
+    pub(super) fn load_screenshots(&mut self, home: PathBuf) {
         if self.screenshots.home.as_ref() != Some(&home) {
             self.screenshots = Screenshots {
                 home: Some(home.clone()),
@@ -129,13 +129,13 @@ impl Launcher {
             FIRST
         };
         let folder = screenshots::folder(&home);
-        let mut buttons = div().flex().items_center().gap(px(6.));
+        let mut buttons = div().flex().items_center().gap(px(8.));
         if list.len() > FIRST {
             let label = match self.screenshots.all {
                 true => tr("Show fewer").to_string(),
                 false => trf("Show all {count}", &[("count", &list.len().to_string())]),
             };
-            buttons = buttons.child(button("screenshots-all", label, Kind::Ghost, &t).on_click(
+            buttons = buttons.child(tab_action("screenshots-all", label, &t).on_click(
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.screenshots.all = !this.screenshots.all;
                     cx.notify();
@@ -143,8 +143,8 @@ impl Launcher {
             ));
         }
         buttons = buttons.child(
-            button("screenshots-folder", "Open folder", Kind::Ghost, &t)
-                .on_click(move |_, _, cx| cx.open_with_system(&folder)),
+            tab_action("screenshots-folder", "Open folder", &t)
+                .on_click(move |_, _, cx| crate::glass_toast::open(cx, &folder)),
         );
         let grid = div().flex().flex_wrap().gap(px(10.)).children(
             list.into_iter().take(shown).enumerate().map(|(i, shot)| {
@@ -234,7 +234,7 @@ impl Launcher {
                     ))
                     .child(
                         button("screenshot-open", "Open", Kind::Ghost, &t)
-                            .on_click(move |_, _, cx| cx.open_with_system(&open)),
+                            .on_click(move |_, _, cx| crate::glass_toast::open(cx, &open)),
                     )
                     .child(
                         button("screenshot-show", "Show in folder", Kind::Ghost, &t)

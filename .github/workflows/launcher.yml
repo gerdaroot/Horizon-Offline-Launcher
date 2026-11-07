@@ -1,5 +1,5 @@
 # Horizon Offline Launcher: tests on every push and pull request; a tag `launcher@1.2.3` builds the
-# launcher for Windows (with its installer), Linux and macOS, signs the checksums and publishes them
+# launcher for Windows (x64 with its installer, and ARM64), Linux and macOS, signs the checksums and publishes them
 # as a GitHub release, which launchers already installed update themselves from.
 name: launcher
 
@@ -50,6 +50,14 @@ jobs:
             binary: horizon-launcher.exe
             asset: horizon-launcher-windows-x64.zip
             rustflags: -C target-feature=+crt-static
+          # Windows on ARM: the same runner, another target. Optional: a release goes out without it.
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: horizon-launcher.exe
+            asset: horizon-launcher-windows-arm64.zip
+            rustflags: -C target-feature=+crt-static
+            optional: true
           - name: linux
             os: ubuntu-22.04
             binary: horizon-launcher
@@ -65,6 +73,7 @@ jobs:
             binary: horizon-launcher
             asset: horizon-launcher-macos-x64.zip
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
     timeout-minutes: 60
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -90,7 +99,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           if ! xcrun metal --version > /dev/null 2>&1; then
-            echo "LAUNCHER_FEATURES=gpui/runtime_shaders" >> "$GITHUB_ENV"
+            echo "LAUNCHER_FEATURES=gpui_platform/runtime_shaders" >> "$GITHUB_ENV"
           fi
       # A tag launcher@1.2.3 is the launcher's version 1.2.3; other builds say Cargo.toml's.
       - name: Version from the tag
@@ -104,14 +113,14 @@ jobs:
           mkdir -p ../dist
           out=target/release; [[ -n "${{ matrix.target }}" ]] && out="target/${{ matrix.target }}/release"
           case "${{ matrix.name }}" in
-            windows) 7z a -tzip ../dist/${{ matrix.asset }} "./$out/${{ matrix.binary }}" > /dev/null ;;
+            windows*) 7z a -tzip ../dist/${{ matrix.asset }} "./$out/${{ matrix.binary }}" > /dev/null ;;
             linux) tar -czf ../dist/${{ matrix.asset }} -C "$out" ${{ matrix.binary }} ;;
             macos*) (cd "$out" && zip -q "$GITHUB_WORKSPACE/dist/${{ matrix.asset }}" ${{ matrix.binary }}) ;;
           esac
       # The installer most people download (packaging/windows/setup.iss); the zip stays what
       # launchers update themselves from.
       - name: Windows installer
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows'
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -128,14 +137,15 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows'
         with:
           name: Horizon-Offline-Launcher-Setup.exe
           path: dist/Horizon-Offline-Launcher-Setup.exe
 
   release:
     needs: [test, build]
-    if: startsWith(github.ref, 'refs/tags/launcher@')
+    # The ARM64 build is optional: the release goes out with whatever was built.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/launcher@') && needs.test.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

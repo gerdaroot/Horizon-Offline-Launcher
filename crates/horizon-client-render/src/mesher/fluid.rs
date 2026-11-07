@@ -189,11 +189,12 @@ impl FluidFlowWorld for FlowView<'_> {
     }
 }
 /// Emits one fluid cell at section-relative `[x, y, z]`.
-/// `(nether, shader_pack_lighting)`: the Nether's face shading, or none when a shader pack lights
-/// the faces (`Mesher::shader_pack_lighting`).
+/// `(nether, shader_pack_lighting, separate_ao)`: the Nether's face shading, only the up-face value
+/// when a shader pack lights the faces (`Mesher::shader_pack_lighting`), and whether to keep pure
+/// alpha for separate AO.
 pub(super) fn tesselate(
     tables: &MeshTables,
-    (nether, shader_pack_lighting): (bool, bool),
+    (nether, shader_pack_lighting, separate_ao): (bool, bool, bool),
     pad: &Padded,
     water_color: u32,
     out: &mut SectionMesh,
@@ -202,7 +203,7 @@ pub(super) fn tesselate(
     use horizon_assets::model::Direction as D;
     let cardinal = |d: D| {
         if shader_pack_lighting {
-            1.0
+            lighting::pack_flat(nether)
         } else {
             lighting::cardinal(nether, d)
         }
@@ -244,7 +245,11 @@ pub(super) fn tesselate(
     };
     let color = |by: f32| {
         let rgb = [16, 8, 0].map(|shift| lighting::scale((tint >> shift & 255) as i32, by) as u32);
-        crate::mesher::emitting(pack_rgb(rgb), emission)
+        if separate_ao {
+            pack_rgb(rgb)
+        } else {
+            crate::mesher::emitting(pack_rgb(rgb), emission)
+        }
     };
     let height = |p: [i32; 3]| -> f32 {
         let s = at(p);
@@ -330,7 +335,11 @@ pub(super) fn tesselate(
         if tables.is_animated(layer) && !sprite_layers.contains(&layer) {
             sprite_layers.push(layer);
         }
-        let color = fluid_face(color, face);
+        let color = if separate_ao {
+            color
+        } else {
+            fluid_face(color, face)
+        };
         let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
         target.extend(v.map(vertex));
         if back {
@@ -439,7 +448,10 @@ pub(super) fn tesselate(
             Some(layer) if face_state.overlay => (layer, true),
             _ => (flow, false),
         };
-        let side = if matches!(d, Direction::North | Direction::South) {
+        // Vanilla's side is the up value times the side's; a shader pack's has no side factor.
+        let side = if shader_pack_lighting {
+            1.0
+        } else if matches!(d, Direction::North | Direction::South) {
             cardinal(D::North)
         } else {
             cardinal(D::West)

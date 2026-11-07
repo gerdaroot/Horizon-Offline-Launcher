@@ -5,7 +5,7 @@
 //! changed in the format of `VanillaDispenserOracle`.
 use super::{
     Game,
-    dispenser::{Slot, body_in_head, mob_set_slot, mob_slot_item},
+    dispenser::{Slot, mob_set_slot, mob_slot_item},
 };
 use horizon_client::{
     Result,
@@ -60,6 +60,22 @@ pub(super) fn record_events(events: &[horizon_world::level::LevelEvent]) {
             record(|| format!("L {id} {},{},{} {data}", pos.x, pos.y, pos.z));
         }
     }
+}
+
+/// The `S` line for a level event whose sound `LevelEventHandler` plays on the
+/// client (`playLocalSound`), so Horizon plays it unshared and never captures
+/// it: the lava fizz (1501, #7652) and `ComposterBlock.handleFill` (1500,
+/// `data > 0` = success, #9069).
+fn event_sound(line: &str) -> Option<String> {
+    let mut parts = line.strip_prefix("L ")?.split(' ');
+    let (id, pos, data) = (parts.next()?, parts.next()?, parts.next()?);
+    let sound = match id {
+        "1501" => "minecraft:block.lava.extinguish",
+        "1500" if data.parse::<i32>().ok()? > 0 => "minecraft:block.composter.fill_success",
+        "1500" => "minecraft:block.composter.fill",
+        _ => return None,
+    };
+    Some(format!("S {pos} {sound}"))
 }
 
 /// Java's `String.format("%.6f")`: the exact value rounded half up (away
@@ -318,6 +334,8 @@ impl Game<'_> {
                 ),
                 None => "respawn none".to_owned(),
             });
+        } else if let Some(op) = case.get("wake") {
+            used.push(self.fixture_wake(origin, op)?);
         } else if let Some(op) = case.get("attack") {
             used = self.fixture_attack(op, &targets)?;
         } else if case.get("hopper").is_some() {
@@ -431,9 +449,11 @@ impl Game<'_> {
             out.push(self.fixture_describe(i, t));
         }
         let log = LOG.with(|log| log.borrow_mut().take()).unwrap_or_default();
+        let event_sounds: Vec<String> = log.iter().filter_map(|l| event_sound(l)).collect();
         out.extend(log);
-        for (sound, at, _, _) in self.audio.capture.take().unwrap_or_default() {
-            out.push(format!("S {} {sound}", floor_pos(at)));
+        out.extend(event_sounds);
+        for sound in self.audio.capture.take().unwrap_or_default() {
+            out.push(format!("S {} {}", floor_pos(sound.position), sound.event));
         }
         out.extend(used);
         out.push(format!("rng {}", self.world.random.next_long()));
@@ -533,6 +553,8 @@ impl Game<'_> {
             self.keys.insert(KeyCode::ShiftLeft);
         }
         self.using = None;
+        // The oracle's player wears nothing: no armor left on from an earlier case.
+        self.armor = Default::default();
         self.inventory[self.selected] = stack.clone();
         self.offhand = parse_stack(op["offhand"].as_str().unwrap_or("-"))?;
         // The used statistic of each item held, once.
@@ -902,6 +924,37 @@ impl Game<'_> {
         Ok(out)
     }
 
+    /// A villager lying in the bed at `origin` with `yaw` wakes up
+    /// (`Villager.stopSleeping`): where it stands and the yaw it turns to.
+    fn fixture_wake(&mut self, origin: BlockPos, op: &Value) -> Result<String> {
+        let kind = self
+            .res
+            .mob_types()
+            .get("minecraft:villager")
+            .cloned()
+            .ok_or("no mob type minecraft:villager")?;
+        let bed = [origin.x, origin.y, origin.z];
+        let lying = horizon_core::geometry::Vec3::new(
+            f64::from(bed[0]) + 0.5,
+            f64::from(bed[1]) + 0.6875,
+            f64::from(bed[2]) + 0.5,
+        );
+        let yaw = op["yaw"].as_f64().unwrap_or(0.0) as f32;
+        let mut villager = Mob::new(1, kind, lying, yaw);
+        horizon_client::mobs::villager::ext_mut(&mut villager).sleeping_pos = Some(bed);
+        let mut events = Vec::new();
+        let w = self.mob_world_base(&[]);
+        horizon_client::mobs::villager::stop_sleeping(&mut villager, &w, &mut events);
+        let p = villager.position;
+        Ok(format!(
+            "wake {} {} {} {}",
+            num(p.x),
+            num(p.y),
+            num(p.z),
+            villager.yaw.to_bits() as i32
+        ))
+    }
+
     /// `EntityType.create` and `snapTo` for one target: no spawn finalization.
     fn fixture_target(&mut self, e: &Value) -> Result<Target> {
         let kind = e["type"].as_str().unwrap_or("minecraft:pig");
@@ -936,6 +989,7 @@ impl Game<'_> {
             &mut mob.extra.main_hand,
             &mut mob.extra.off_hand,
             &mut mob.extra.head,
+            &mut mob.extra.body,
             &mut mob.extra.chest,
             &mut mob.extra.legs,
             &mut mob.extra.feet,
@@ -951,8 +1005,8 @@ impl Game<'_> {
         if flag("baby") && ageable {
             mob.extra.age = -24000;
         }
-        let tamable =
-            body_in_head(s) || matches!(s, Species::Cat | Species::Parrot | Species::Ocelot);
+        let tamable = horizon_client::mobs::drops::body_slot_species(s)
+            || matches!(s, Species::Cat | Species::Parrot | Species::Ocelot);
         if flag("tame") && tamable {
             mob.extra.tame = true;
         }

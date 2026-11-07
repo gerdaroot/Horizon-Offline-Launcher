@@ -29,7 +29,7 @@
 
 - **No account is required.** Play starts the game offline under your own name, and everything works without one: mods, resource packs, shaders, instances, servers, friends. These builds have no Microsoft sign-in at all.
 - **Your own skin and cape.** Pick a skin PNG (classic or slim arms) and a cape PNG in Settings → Account: you wear them in single player and on servers that send no skin of their own.
-- **You can pick your own jar.** "Choose jar…" takes a `26.3.jar` from anywhere: TLauncher, your Downloads folder, a USB stick. Without a choice, the launcher finds it by itself in the folders of the official launcher, TLauncher, Prism, MultiMC, Modrinth, ATLauncher and GDLauncher.
+- **You can pick your own jar.** "Choose jar…" takes a `26.3.jar` from anywhere: TLauncher, your Downloads folder, a USB stick. Without a choice, the launcher finds it by itself in the folders of the official launcher, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher and Dawn.
 - **Updates come from this repository only.** The launcher and the game update themselves from its releases, signed with its own key, so an upstream update can't bring the account requirement back.
 - **Horizon's latest fixes.** The game is built from Horizon's current Nightly with this fork's changes on top.
 - **A real Windows installer**, or one command on any system, with desktop and Start menu shortcuts.
@@ -89,9 +89,13 @@ Your offline name is changed with the player button at the top right; its skin i
 
 **How do I play with friends?** Pause → Friends gives an invite code; LAN works too. Any server that lets players without an account in (`online-mode=false`) works; online-mode servers (Hypixel and the like) check every player's Minecraft license with Mojang and don't.
 
-**Do other players see my skin?** Skins between players go through Mojang's servers, which only take a licensed account's. On servers for players without an account, set yours with the server's skin command (SkinsRestorer: `/skin <name or link>`): everyone sees that one. The skin you pick in the launcher is the one you see on yourself where the server gives none. Capes aren't drawn yet.
+**Do other players see my skin?** Skins between players go through Mojang's servers, which only take a licensed account's. On servers for players without an account, set yours with the server's skin command (SkinsRestorer: `/skin <name or link>`): everyone sees that one. The skin and cape you pick in the launcher are the ones you see on yourself where the server gives none.
 
 **Do resource packs work?** Yes, as in Horizon: Options → Resource Packs in the game, or the launcher's resource packs page.
+
+**Prepare says "Missing …\libraries\…" or "asks for an original Minecraft installation".** The jar alone isn't enough: the game also needs the libraries and sounds that come with it. Start version **26.3** once in your launcher (TLauncher, Prism, AstralRinth…) until the main menu, then press Prepare again with the jar on "Automatic". A jar you picked by hand takes those files from the launcher folder it is in, or from any launcher that has 26.3.
+
+**The launcher doesn't open.** It leaves `launcher-crash.txt` in `%APPDATA%\horizon-launcher` and says what to do. "Creating DXGI factory" means Windows is older than Windows 10 version 1803: update Windows. "Creating DirectX renderer" means the graphics driver is old: the launcher retries without DirectComposition by itself, and if it still doesn't open, update the driver from Intel's, NVIDIA's or AMD's site.
 
 **Where are my worlds?** Where the official Horizon launcher keeps them: both use the same data folder, so worlds, instances and settings are shared.
 
@@ -121,7 +125,7 @@ Linux needs `libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-de
 
 GitHub Actions builds Windows, Linux and macOS (Apple Silicon and Intel):
 
-- A `launcher@1.3.0` tag: the launcher, with the Windows installer and the install scripts. It becomes the repository's latest release.
+- A `launcher@1.4.0` tag: the launcher, with the Windows installer and the install scripts. It becomes the repository's latest release.
 - The game, like Horizon, ships as Nightlies: running the `game` workflow puts this fork's client into Horizon's current Nightly files and publishes them as the `nightly` pre-release, "Nightly <date> · <commit>". The previous one stays a week as `nightly-<date>`.
 
 Both are signed with the repository's key (the `RELEASE_SIGNING_KEY` secret); launchers refuse anything else.
@@ -163,7 +167,7 @@ The game and nearly all of the code are [Horizon](https://github.com/horizon-rus
 
 - **Аккаунт не нужен.** «Играть» запускает игру офлайн под вашим ником, и без аккаунта работает всё: моды, ресурс-паки, шейдеры, сборки, серверы, друзья. Входа через Microsoft в этих сборках нет вообще.
 - **Свой скин и плащ.** PNG скина (обычные или тонкие руки) и PNG плаща выбираются в «Настройки → Аккаунт»: они видны на вас в одиночной игре и на серверах, которые не дают свой скин.
-- **Можно выбрать свой jar.** Кнопка «Выбрать jar…» берёт файл `26.3.jar` откуда угодно: из TLauncher, папки «Загрузки» или с флешки. Без выбора лаунчер сам ищет его в папках официального лаунчера, TLauncher, Prism, MultiMC, Modrinth, ATLauncher и GDLauncher.
+- **Можно выбрать свой jar.** Кнопка «Выбрать jar…» берёт файл `26.3.jar` откуда угодно: из TLauncher, папки «Загрузки» или с флешки. Без выбора лаунчер сам ищет его в папках официального лаунчера, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher и Dawn.
 - **Обновления только из этого репозитория.** Лаунчер и игра обновляются сами из его релизов, подписанных своим ключом, поэтому официальное обновление не вернёт обязательный вход.
 - **Свежие исправления Horizon.** Игра собирается из текущего Nightly Horizon с изменениями этого форка поверх.
 - **Настоящий установщик для Windows** или одна команда на любой системе. Ярлыки на рабочем столе и в меню «Пуск» создаются сами.
@@ -223,9 +227,13 @@ curl -fsSL https://github.com/gerdaroot/Horizon-Offline-Launcher/releases/latest
 
 **Как играть с друзьями?** Пауза → «Друзья» даёт код приглашения, LAN тоже работает. Подходит любой сервер, который пускает игроков без аккаунта (`online-mode=false`). Серверы с online-mode (Hypixel и подобные) проверяют лицензию каждого игрока у Mojang и не пустят.
 
-**Видят ли другие мой скин?** Скины между игроками раздают серверы Mojang, а туда загружается только скин лицензии. На серверах для игроков без аккаунта ставьте скин командой сервера (SkinsRestorer: `/skin <ник или ссылка>`) — его увидят все. Скин из лаунчера — тот, что вы видите на себе там, где сервер не дал свой. Плащи пока не рисуются.
+**Видят ли другие мой скин?** Скины между игроками раздают серверы Mojang, а туда загружается только скин лицензии. На серверах для игроков без аккаунта ставьте скин командой сервера (SkinsRestorer: `/skin <ник или ссылка>`) — его увидят все. Скин и плащ из лаунчера — те, что вы видите на себе там, где сервер не дал свой.
 
 **Ресурс-паки работают?** Да, как в Horizon: «Настройки → Пакеты ресурсов» в игре или страница ресурс-паков в лаунчере.
+
+**Prepare пишет «Missing …\libraries\…» или «нужна оригинальная установка Minecraft».** Одного jar мало: игре нужны ещё библиотеки и звуки, которые лаунчер скачивает вместе с ним. Один раз запустите версию **26.3** в своём лаунчере (TLauncher, Prism, AstralRinth…) до главного меню, потом снова нажмите Prepare с jar на «Автоматически». Выбранный вручную jar берёт эти файлы из папки лаунчера, где он лежит, или из любого лаунчера, где есть 26.3.
+
+**Лаунчер не открывается.** Он оставляет `launcher-crash.txt` в `%APPDATA%\horizon-launcher` и пишет, что делать. «Creating DXGI factory» — Windows старше Windows 10 версии 1803: обновите Windows. «Creating DirectX renderer» — старый драйвер видеокарты: лаунчер сам пробует ещё раз без DirectComposition, а если всё равно не открылся, обновите драйвер с сайта Intel, NVIDIA или AMD.
 
 **Где мои миры?** Там же, где у официального лаунчера Horizon: обе программы используют одну папку данных, так что миры, сборки и настройки общие.
 
@@ -255,7 +263,7 @@ cargo build --release
 
 GitHub Actions собирает Windows, Linux и macOS (Apple Silicon и Intel):
 
-- Тег `launcher@1.3.0` — лаунчер, с установщиком для Windows и скриптами установки. Становится последним релизом репозитория.
+- Тег `launcher@1.4.0` — лаунчер, с установщиком для Windows и скриптами установки. Становится последним релизом репозитория.
 - Игра, как и у Horizon, выходит Nightly-сборками: запуск workflow `game` кладёт клиент этого форка в файлы текущего Nightly Horizon и публикует их пре-релизом `nightly`, «Nightly <дата> · <коммит>». Предыдущий хранится неделю как `nightly-<дата>`.
 
 Оба подписываются ключом репозитория (секрет `RELEASE_SIGNING_KEY`), всё остальное лаунчеры отвергают.

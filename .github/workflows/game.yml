@@ -1,8 +1,9 @@
 # The game, as the launcher installs it. Horizon ships only Nightlies now (docs/release-flow.md), and
-# so does this fork: a run builds this fork's horizon-client for Linux, Windows and macOS (Apple
-# Silicon and Intel) and puts it into Horizon's own Nightly files (their exporters, horizon-prepare
+# so does this fork: a run builds this fork's horizon-client for Linux, Windows (x64 and ARM64) and
+# macOS (Apple Silicon and Intel) and puts it into Horizon's own Nightly files (their exporters, horizon-prepare
 # and the rest are built from Mojang's jars on Horizon's private runner), then signs the checksums
-# for the nightly channel and publishes them as this repository's `nightly` pre-release, titled
+# for the nightly channel (SHA256SUMS.sig) and for this build's own version (SHA256SUMS.v2.sig,
+# nightly-<date>-<commit>, which current launchers require) and publishes them as this repository's `nightly` pre-release, titled
 # "Nightly <date> · <this fork's commit>". The one before stays a week as nightly-<its date>.
 # The launcher's own release stays GitHub's "latest", where install.ps1 and install.sh download
 # from.
@@ -44,10 +45,15 @@ jobs:
           # Every platform takes the files of this one Nightly, even if Horizon publishes the next
           # while the clients build.
           mkdir upstream
-          for asset in horizon-linux-x86_64.tar.gz horizon-windows-x64.zip horizon-macos-arm64.zip                        horizon-macos-x64.zip horizon-server-linux-x86_64.tar.gz; do
+          for asset in horizon-linux-x86_64.tar.gz horizon-windows-x64.zip horizon-macos-arm64.zip \
+                       horizon-macos-x64.zip horizon-server-linux-x86_64.tar.gz; do
             gh release download "$UPSTREAM" -R horizon-rust/horizon -D upstream -p "$asset"
           done
-          [[ "$(gh api "repos/horizon-rust/horizon/releases/tags/$UPSTREAM" --jq .name)" == "$name" ]]             || { echo "::error::Horizon's $UPSTREAM changed while downloading; run again"; exit 1; }
+          # Windows ARM64: only when Horizon's Nightly has it (its build may fail there too).
+          gh release download "$UPSTREAM" -R horizon-rust/horizon -D upstream -p horizon-windows-arm64.zip \
+            || echo "::warning::Horizon's $UPSTREAM has no horizon-windows-arm64.zip: this Nightly goes out without it"
+          [[ "$(gh api "repos/horizon-rust/horizon/releases/tags/$UPSTREAM" --jq .name)" == "$name" ]] \
+            || { echo "::error::Horizon's $UPSTREAM changed while downloading; run again"; exit 1; }
           {
             echo "date=$(date -u +%F)"
             echo "short=${GITHUB_SHA:0:7}"
@@ -78,6 +84,15 @@ jobs:
             client: horizon-client.exe
             # The C runtime linked in, so the game runs without the Visual C++ redistributable.
             rustflags: -C target-feature=+crt-static
+          # Windows on ARM: the same runner, another target. Optional: without it, ARM64 launchers
+          # install the x64 build.
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset: horizon-windows-arm64.zip
+            client: horizon-client.exe
+            rustflags: -C target-feature=+crt-static
+            optional: true
           - name: macos
             os: macos-15
             asset: horizon-macos-arm64.zip
@@ -89,6 +104,7 @@ jobs:
             asset: horizon-macos-x64.zip
             client: horizon-client
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
     timeout-minutes: 180
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -124,6 +140,8 @@ jobs:
       - name: Horizon's files of that Nightly
         run: |
           mkdir -p upstream dist
+          [[ -f "horizon-files/${{ matrix.asset }}" ]] \
+            || { echo "::error::Horizon's Nightly has no ${{ matrix.asset }}"; exit 1; }
           mv "horizon-files/${{ matrix.asset }}" upstream/
           if [[ -n "${{ matrix.server_asset }}" ]]; then
             mv "horizon-files/${{ matrix.server_asset }}" dist/
@@ -159,6 +177,8 @@ jobs:
 
   release:
     needs: [pick, build]
+    # The ARM64 build is optional: the release goes out with whatever was built.
+    if: ${{ !cancelled() && needs.pick.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -171,16 +191,30 @@ jobs:
           path: dist
           pattern: game-*
           merge-multiple: true
-      - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig) for the nightly channel
+      - name: Sign the checksums for the nightly channel (SHA256SUMS.sig) and for this build (SHA256SUMS.v2.sig)
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          ALSO_FOR: nightly-${{ needs.pick.outputs.date }}-${{ needs.pick.outputs.short }}
         run: |
           [[ -n "$RELEASE_SIGNING_KEY" ]] || { echo "::error::The RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          for required in horizon-linux-x86_64.tar.gz horizon-windows-x64.zip horizon-macos-arm64.zip \
+                          horizon-macos-x64.zip horizon-server-linux-x86_64.tar.gz; do
+            [[ -f "dist/$required" ]] || { echo "::error::dist/$required was not built"; exit 1; }
+          done
+          arm64=(); if [[ -f dist/horizon-windows-arm64.zip ]]; then arm64=(dist/horizon-windows-arm64.zip)
+          else echo "::warning::horizon-windows-arm64.zip is missing: SHA256SUMS goes out without it"; fi
           bash tools/ci/sign_release.sh nightly dist/horizon-linux-x86_64.tar.gz dist/horizon-windows-x64.zip \
-            dist/horizon-macos-arm64.zip dist/horizon-macos-x64.zip dist/horizon-server-linux-x86_64.tar.gz
+            "${arm64[@]}" dist/horizon-macos-arm64.zip dist/horizon-macos-x64.zip dist/horizon-server-linux-x86_64.tar.gz
       - uses: dtolnay/rust-toolchain@stable
-      - name: The signature, checked as launchers check it
-        run: cargo run --locked --quiet -p horizon-release-sign -- verify --tag nightly --publishing dist
+      - name: The signatures, checked as launchers check them
+        env:
+          DATE: ${{ needs.pick.outputs.date }}
+          SHORT: ${{ needs.pick.outputs.short }}
+        run: |
+          cargo run --locked --quiet -p horizon-release-sign -- verify --tag nightly --publishing dist
+          # The version's own signature, which current launchers require: the title below names it.
+          cargo run --locked --quiet -p horizon-release-sign -- verify --tag "nightly-${DATE}-${SHORT}" \
+            --signature SHA256SUMS.v2.sig --publishing dist
       - name: Publish as the `nightly` pre-release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -194,13 +228,18 @@ jobs:
           Horizon Offline Launcher installs it by itself; there is nothing to download here by hand.
           EOF
           python3 tools/ci/nightly.py rotate
+          arm64=()
+          if [[ -f dist/horizon-windows-arm64.zip ]]; then
+            arm64=("dist/horizon-windows-arm64.zip#Game files the launcher installs: Windows ARM64 (horizon-windows-arm64.zip)")
+          fi
           # A pre-release, never GitHub's latest: the latest stays the launcher's own release.
           gh release create nightly --prerelease --latest=false --target "$GITHUB_SHA" \
             --title "Nightly $DATE · $SHORT" --notes-file notes.md \
             "dist/horizon-linux-x86_64.tar.gz#Game files the launcher installs: Linux (horizon-linux-x86_64.tar.gz)" \
             "dist/horizon-windows-x64.zip#Game files the launcher installs: Windows (horizon-windows-x64.zip)" \
+            "${arm64[@]}" \
             "dist/horizon-macos-arm64.zip#Game files the launcher installs: macOS on Apple Silicon (horizon-macos-arm64.zip)" \
             "dist/horizon-macos-x64.zip#Game files the launcher installs: macOS on Intel (horizon-macos-x64.zip)" \
             "dist/horizon-server-linux-x86_64.tar.gz#Horizon's dedicated server for Linux (horizon-server-linux-x86_64.tar.gz)" \
-            dist/SHA256SUMS dist/SHA256SUMS.sig
+            dist/SHA256SUMS dist/SHA256SUMS.sig dist/SHA256SUMS.v2.sig
           python3 tools/ci/nightly.py prune --days 7

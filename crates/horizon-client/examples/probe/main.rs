@@ -4,11 +4,13 @@
 //!
 //! This file only lists the probes, so that adding one reruns no harness: tools/parity.py leaves it out of
 //! their dependencies. How a probe runs is in dispatch.rs.
+extern crate horizon_client_lib as horizon_client;
 #[macro_use]
 mod dispatch;
 
 use dispatch::{args, args_os};
 
+mod allay_interaction_fixture;
 mod ambient_fixture;
 mod arrow_probe;
 mod audio_attributes_fixture;
@@ -25,6 +27,7 @@ mod breaking_fixture;
 mod camera_probe;
 mod cauldron_fixture;
 mod chat_screen_fixture;
+mod chest_load_fixture;
 mod chest_pair_fixture;
 mod cloud_fixture;
 mod command_parse_fixture;
@@ -39,6 +42,7 @@ mod entity_anim_fixture;
 mod entity_components_probe;
 mod entity_death_loot_fixture;
 mod entity_particles_probe;
+mod entity_sound_packet_fixture;
 mod environment_fixture;
 mod finalize_spawn_fixture;
 mod fire_starter_sound_probe;
@@ -51,9 +55,11 @@ mod held_drop_fixture;
 mod held_item_stack_probe;
 mod hotbar_fixture;
 mod hud_fixture;
+mod inline_object_fixture;
 mod input_probe;
 mod interaction_input_fixture;
 mod lan_probe;
+mod late_entity_pair_fixture;
 mod light_parity;
 mod lore_tooltip_fixture;
 mod marker_particles_probe;
@@ -84,6 +90,7 @@ mod scoreboard_fixture;
 mod screen_layout_fixture;
 mod section_mesh_fixture;
 mod server_files_probe;
+mod sheep_dye_fixture;
 mod situational_music_fixture;
 mod skin_image_fixture;
 mod sound_engine_fixture;
@@ -106,6 +113,7 @@ mod vehicle_container_fixture;
 mod weather_fixture;
 mod world_border_render_fixture;
 mod world_options_fixture;
+mod zombie_cure_sound_probe;
 
 probes! {
     ambient_fixture,
@@ -126,6 +134,7 @@ probes! {
     cauldron_fixture,
     chat_screen_fixture,
     chest_pair_fixture,
+    chest_load_fixture,
     cloud_fixture,
     command_parse_fixture,
     container_screen_probe,
@@ -140,6 +149,7 @@ probes! {
     environment_fixture,
     finalize_spawn_fixture,
     fire_starter_sound_probe,
+    zombie_cure_sound_probe,
     firework_tooltip_fixture,
     first_person_probe,
     frame_limiter_probe,
@@ -150,6 +160,7 @@ probes! {
     hotbar_fixture,
     hud_fixture,
     input_probe,
+    inline_object_fixture,
     interaction_input_fixture,
     lan_probe,
     light_parity,
@@ -184,6 +195,10 @@ probes! {
     server_files_probe,
     situational_music_fixture,
     skin_image_fixture,
+    late_entity_pair_fixture,
+    sheep_dye_fixture,
+    allay_interaction_fixture,
+    entity_sound_packet_fixture,
     sound_engine_fixture,
     sound_event_fixture,
     spawn_rules_fixture,

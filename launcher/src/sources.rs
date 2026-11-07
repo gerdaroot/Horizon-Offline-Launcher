@@ -1,5 +1,6 @@
 //! Where the player's own Minecraft files are: the folder they chose, the official launcher's,
-//! or another launcher's (Prism Launcher, MultiMC, Modrinth App, ATLauncher, GDLauncher), #434.
+//! or another launcher's (Prism Launcher, MultiMC, Modrinth App, ATLauncher, GDLauncher, Dawn
+//! Client), #434.
 //! horizon-prepare reads the official launcher's layout and pins the version JSON's own sha1, so
 //! files found elsewhere are linked into that layout in the launcher's data folder, with the
 //! pinned version JSON from Mojang when the other launcher keeps its own rewrite of it.
@@ -132,6 +133,7 @@ pub fn known_folders(os: Os, f: &Folders) -> Vec<(&'static str, PathBuf)> {
                 "ATLauncher",
                 flatpak("com.atlauncher.ATLauncher", "data/atlauncher"),
             ),
+            ("Dawn Client", f.home.join(".dawn")),
         ],
         Os::MacOs => vec![
             (OFFICIAL, f.data.join("minecraft")),
@@ -139,12 +141,14 @@ pub fn known_folders(os: Os, f: &Folders) -> Vec<(&'static str, PathBuf)> {
             ("MultiMC", f.data.join("MultiMC")),
             ("Modrinth App", f.data.join("ModrinthApp")),
             ("ATLauncher", f.data.join("ATLauncher")),
+            ("Dawn Client", f.data.join(".dawn")),
         ],
         Os::Windows => vec![
             (OFFICIAL, f.data.join(".minecraft")),
             ("Prism Launcher", f.data.join("PrismLauncher")),
             ("Modrinth App", f.data.join("ModrinthApp")),
             ("ATLauncher", f.data.join("ATLauncher")),
+            ("Dawn Client", f.data.join(".dawn")),
         ],
     };
     // Names every system shares: the Modrinth App before its rename, AstralRinth (the Modrinth
@@ -247,6 +251,14 @@ fn instance_root(dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The Dawn Client root above `dir`: Dawn stores its shared official cache in `cache/minecraft/`
+/// directly below `.dawn/`.
+fn dawn_root(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|a| a.file_name() == Some(std::ffi::OsStr::new(".dawn")))
+        .map(Path::to_path_buf)
+}
+
 /// The launcher whose tree `path` is inside, when its folder name is one Horizon knows, so the
 /// not-found message can name it (#693).
 fn launcher_of(path: &Path) -> Option<&'static str> {
@@ -260,13 +272,14 @@ fn launcher_of(path: &Path) -> Option<&'static str> {
             "AstralRinthApp" => Some("AstralRinth"),
             "atlauncher" | "ATLauncher" => Some("ATLauncher"),
             "gdlauncher_carbon" | "gdlauncher_next" => Some("GDLauncher"),
+            ".dawn" | "dawn" => Some("Dawn Client"),
             _ => None,
         })
 }
 
 /// The pinned version in one launcher folder, or what the folder lacks. The folder holding
 /// `libraries` is the folder itself or its `meta` (Modrinth App), `data` (GDLauncher) or
-/// `datastore` (GDLauncher Next).
+/// `datastore` (GDLauncher Next) or `cache/minecraft` (Dawn Client).
 pub fn find(dir: &Path, pins: &Pins) -> Result<Found, String> {
     if !dir.is_dir() {
         return Err("the folder doesn't exist".into());
@@ -275,7 +288,7 @@ pub fn find(dir: &Path, pins: &Pins) -> Result<Found, String> {
     let mut other = None;
     let bases = [dir.to_path_buf()]
         .into_iter()
-        .chain(["meta", "data", "datastore"].map(|sub| dir.join(sub)));
+        .chain(["meta", "data", "datastore", "cache/minecraft"].map(|sub| dir.join(sub)));
     for base in bases {
         for jar in client_jars(&base, v) {
             let client = base.join(&jar);
@@ -323,7 +336,7 @@ pub fn not_found(version: &str, checked: &[(PathBuf, String)], chosen: &Path) ->
         ),
         None => format!(
             "\n  • Play {version} once in the official Minecraft launcher, or in Prism Launcher, \
-             MultiMC, the Modrinth App, ATLauncher or GDLauncher, then prepare again.\n  \
+             MultiMC, the Modrinth App, ATLauncher, GDLauncher or Dawn Client, then prepare again.\n  \
              • Or choose the folder where your launcher keeps Minecraft {version} (Minecraft \
              folder › Choose… in the launcher, --minecraft on the command line)."
         ),
@@ -358,10 +371,10 @@ pub fn resolve(
     let mut checked = Vec::new();
     let mut found = None;
     // The chosen folder, the folders above it (an instance's own folder may be chosen), and,
-    // when it is inside a Prism or MultiMC instance tree, the launcher root above `instances`
-    // that holds their shared `libraries` (#693).
+    // when it is inside a Prism or MultiMC instance tree or a Dawn Client folder, the launcher
+    // root that holds their shared `libraries` (#693).
     let mut dirs: Vec<PathBuf> = chosen.ancestors().take(4).map(Path::to_path_buf).collect();
-    if let Some(root) = instance_root(chosen) {
+    if let Some(root) = instance_root(chosen).or_else(|| dawn_root(chosen)) {
         if !dirs.contains(&root) {
             dirs.push(root);
         }
@@ -403,11 +416,15 @@ pub fn resolve(
 
 /// A client jar the player picked themselves, wherever it is: checked against the pin, then
 /// linked into the official layout with the `libraries` and `assets` of the launcher folder it
-/// sits in (the closest folder above that has them), and the version JSON beside it or Mojang's.
+/// sits in (the closest folder above that has them, up to Prism's and ATLauncher's
+/// `libraries/com/mojang/minecraft/<v>/`), and the version JSON beside it or Mojang's. A jar
+/// outside any launcher folder (copied to Downloads) takes them from the first of `others` that
+/// has the version, else from the first that has a `libraries` folder at all.
 pub fn from_jar(
     jar: &Path,
     pins: &Pins,
     linked: &Path,
+    others: &[PathBuf],
     fetch: Fetch,
     log: &dyn Fn(String),
 ) -> Result<Resolved, String> {
@@ -423,12 +440,22 @@ pub fn from_jar(
         ));
     }
     let folder = jar.parent().unwrap_or(jar);
-    let base = folder
-        .ancestors()
-        .take(5)
-        .find(|d| d.join("assets").is_dir() || d.join("libraries").is_dir())
-        .unwrap_or(folder)
-        .to_path_buf();
+    let has_files = |d: &Path| d.join("assets").is_dir() || d.join("libraries").is_dir();
+    // Six levels: Prism's jar is in libraries/com/mojang/minecraft/<v>/, its folder above that.
+    let near = folder.ancestors().take(6).find(|d| has_files(d));
+    let base = match near {
+        Some(d) => d.to_path_buf(),
+        None => match borrowed_files(others, linked, pins) {
+            Some(b) => {
+                log(format!(
+                    "No libraries beside the jar: using those in {}",
+                    b.display()
+                ));
+                b
+            }
+            None => folder.to_path_buf(),
+        },
+    };
     let manifest = [
         jar.with_extension("json"),
         base.join(format!("versions/{v}/{v}.json")),
@@ -449,6 +476,21 @@ pub fn from_jar(
     }
     link_official_layout(&found, pins, linked, fetch, log)?;
     Ok(Resolved::Folder(linked.to_path_buf()))
+}
+
+/// Where a lone jar takes its libraries and assets: the first of `others` (never the linked
+/// folder itself) that has the pinned version, else the first with a `libraries` folder.
+fn borrowed_files(others: &[PathBuf], linked: &Path, pins: &Pins) -> Option<PathBuf> {
+    let others: Vec<&PathBuf> = others.iter().filter(|d| d.as_path() != linked).collect();
+    others
+        .iter()
+        .find_map(|d| find(d, pins).ok().map(|f| f.base))
+        .or_else(|| {
+            others
+                .iter()
+                .flat_map(|d| ["", "meta", "data", "datastore"].map(|sub| d.join(sub)))
+                .find(|b| b.join("libraries").is_dir())
+        })
 }
 
 /// The pinned version JSON at `path`, from piston-meta (by its sha1) unless it is there.
