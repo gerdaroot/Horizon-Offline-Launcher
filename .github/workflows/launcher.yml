@@ -145,14 +145,23 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Check for signing key
+        id: signing
+        env:
+          KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: echo "set=$([[ -n "$KEY" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig)
+        if: steps.signing.outputs.set == 'true'
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: bash tools/ci/sign_release.sh "$GITHUB_REF_NAME" dist/*
+      - name: Unsigned release
+        if: steps.signing.outputs.set != 'true'
         run: |
-          [[ -n "$RELEASE_SIGNING_KEY" ]] || { echo "::error::The RELEASE_SIGNING_KEY secret is not set"; exit 1; }
-          bash tools/ci/sign_release.sh "$GITHUB_REF_NAME" dist/*
+          cd dist && sha256sum -- * > SHA256SUMS
       - uses: dtolnay/rust-toolchain@stable
       - name: The signature, checked as launchers check it
+        if: steps.signing.outputs.set == 'true'
         run: cargo run --locked --quiet -p horizon-release-sign -- verify --tag "$GITHUB_REF_NAME" dist
       - uses: softprops/action-gh-release@v2
         with:
