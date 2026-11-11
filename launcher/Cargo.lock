@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-launcher"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "base64",
  "chacha20poly1305",

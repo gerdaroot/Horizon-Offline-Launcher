@@ -125,7 +125,7 @@ Linux needs `libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-de
 
 GitHub Actions builds Windows, Linux and macOS (Apple Silicon and Intel):
 
-- A `launcher@1.4.2` tag: the launcher, with the Windows installer and the install scripts. It becomes the repository's latest release.
+- A `launcher@1.4.3` tag: the launcher, with the Windows installer and the install scripts. It becomes the repository's latest release.
 - The game, like Horizon, ships as Nightlies: running the `game` workflow puts this fork's client into Horizon's current Nightly files and publishes them as the `nightly` pre-release, "Nightly <date> · <commit>". The previous one stays a week as `nightly-<date>`.
 
 Both are signed with the repository's key (the `RELEASE_SIGNING_KEY` secret); launchers refuse anything else.
@@ -263,7 +263,7 @@ cargo build --release
 
 GitHub Actions собирает Windows, Linux и macOS (Apple Silicon и Intel):
 
-- Тег `launcher@1.4.2` — лаунчер, с установщиком для Windows и скриптами установки. Становится последним релизом репозитория.
+- Тег `launcher@1.4.3` — лаунчер, с установщиком для Windows и скриптами установки. Становится последним релизом репозитория.
 - Игра, как и у Horizon, выходит Nightly-сборками: запуск workflow `game` кладёт клиент этого форка в файлы текущего Nightly Horizon и публикует их пре-релизом `nightly`, «Nightly <дата> · <коммит>». Предыдущий хранится неделю как `nightly-<дата>`.
 
 Оба подписываются ключом репозитория (секрет `RELEASE_SIGNING_KEY`), всё остальное лаунчеры отвергают.
