@@ -34,7 +34,7 @@ jobs:
         with:
           workspaces: launcher
       - name: Libraries GPUI links to
-        run: bash tools/ci/apt_install.sh libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+        run: bash "$GITHUB_WORKSPACE/tools/ci/apt_install.sh" libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
       - run: cargo test --release --locked
 
   build:
@@ -90,7 +90,7 @@ jobs:
           key: ${{ matrix.name }}
       - name: Linux libraries GPUI links to
         if: runner.os == 'Linux'
-        run: bash tools/ci/apt_install.sh libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+        run: bash "$GITHUB_WORKSPACE/tools/ci/apt_install.sh" libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
       - name: Metal shaders at run time without the Metal toolchain
         if: runner.os == 'macOS'
         run: |

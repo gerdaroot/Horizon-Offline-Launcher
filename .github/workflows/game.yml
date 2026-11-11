@@ -126,7 +126,7 @@ jobs:
           shared-key: game-${{ matrix.name }}
       - name: ALSA and udev headers
         if: runner.os == 'Linux'
-        run: bash tools/ci/apt_install.sh libasound2-dev libudev-dev
+        run: bash "$GITHUB_WORKSPACE/tools/ci/apt_install.sh" libasound2-dev libudev-dev
       - name: Build the client
         run: |
           target=(); [[ -n "${{ matrix.target }}" ]] && target=(--target "${{ matrix.target }}")
