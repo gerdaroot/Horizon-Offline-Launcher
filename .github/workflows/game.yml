@@ -126,7 +126,13 @@ jobs:
           shared-key: game-${{ matrix.name }}
       - name: ALSA and udev headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+        run: |
+          # Ubuntu's mirrors fail now and then (apt exits 100): three tries before giving up.
+          for try in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev && exit 0
+            sleep 20
+          done
+          exit 1
       - name: Build the client
         run: |
           target=(); [[ -n "${{ matrix.target }}" ]] && target=(--target "${{ matrix.target }}")

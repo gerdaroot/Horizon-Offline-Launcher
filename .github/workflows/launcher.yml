@@ -35,8 +35,12 @@ jobs:
           workspaces: launcher
       - name: Libraries GPUI links to
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+          # Ubuntu's mirrors fail now and then (apt exits 100): three tries before giving up.
+          for try in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev && exit 0
+            sleep 20
+          done
+          exit 1
       - run: cargo test --release --locked
 
   build:
@@ -93,8 +97,12 @@ jobs:
       - name: Linux libraries GPUI links to
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+          # Ubuntu's mirrors fail now and then (apt exits 100): three tries before giving up.
+          for try in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev && exit 0
+            sleep 20
+          done
+          exit 1
       - name: Metal shaders at run time without the Metal toolchain
         if: runner.os == 'macOS'
         run: |
