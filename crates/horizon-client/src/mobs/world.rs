@@ -21,6 +21,8 @@ pub struct TargetInfo {
     pub position: Vec3,
     pub eye_y: f64,
     pub bounds: Aabb,
+    /// `LivingEntity.getHitbox`: `bounds` cut below the seat of a rider.
+    pub hitbox: Aabb,
     pub alive: bool,
     pub can_be_seen_as_enemy: bool,
     pub is_player: bool,
@@ -29,6 +31,12 @@ pub struct TargetInfo {
     pub passenger: bool,
 }
 impl MobWorld<'_> {
+    /// `Level.getEntity(uuid)`: the entity a UUID a mob stored names, while it
+    /// is in the level. Nothing when this world keeps no entity UUIDs, or when
+    /// nothing loaded answers to it.
+    pub fn who_by_uuid(&self, uuid: [i32; 4]) -> Option<Who> {
+        self.who_lookup?.who_by_uuid(uuid)
+    }
     /// The biome's base temperature at a position.
     pub fn temperature(&self, x: i32, y: i32, z: i32) -> f32 {
         self.world
@@ -299,6 +307,15 @@ impl MobWorld<'_> {
                 position: p.position,
                 eye_y: p.eye[1],
                 bounds: p.bounds,
+                // A riding player's seat is `Avatar.DEFAULT_VEHICLE_ATTACHMENT`
+                // (0.6) above its feet.
+                hitbox: if p.passenger {
+                    let (lo, hi) = (p.bounds.min_position(), p.bounds.max_position());
+                    let y = (p.position.y + f64::from(0.6_f32)).max(lo.y);
+                    Aabb::new(Vec3::new(lo.x, y, lo.z), hi)
+                } else {
+                    p.bounds
+                },
                 alive: p.alive,
                 can_be_seen_as_enemy: true,
                 is_player: true,
@@ -309,6 +326,7 @@ impl MobWorld<'_> {
                 position: s.position,
                 eye_y: s.eye_y,
                 bounds: s.bounds,
+                hitbox: s.hitbox,
                 alive: s.alive,
                 can_be_seen_as_enemy: !s.playing_dead,
                 is_player: false,
@@ -497,9 +515,11 @@ pub(crate) fn with_resource_test_world(
         others,
         dragon: None,
         leash_boats: &[],
+        who_lookup: None,
         others_grid: None,
         others_index: None,
         others_villagers: None,
+        others_solid: None,
         daylight: true,
         monsters_burn: false,
         game_time: 1000,

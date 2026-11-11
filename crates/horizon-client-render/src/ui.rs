@@ -134,6 +134,10 @@ fn scaling(sprite: &str, r: &Rect) -> NineSlice {
         width: r.w,
         height: r.h,
         border: match sprite {
+            "horizon/jei/button_enabled_v2"
+            | "horizon/jei/button_disabled_v2"
+            | "horizon/jei/button_highlight_v2" => [6; 4],
+            "horizon/jei/search_background_v2" => [6; 4],
             "gui/sprites/widget/button"
             | "gui/sprites/widget/button_highlighted"
             | "gui/sprites/widget/button_disabled" => [3; 4],
@@ -614,7 +618,12 @@ fn button_with_room(
     room: f32,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
-    crate::widgets::record(&label.plain(), [x, y, w, h], active);
+    let plain = label.plain();
+    crate::widgets::record(&plain, [x, y, w, h], active);
+    // An icon button has no label to record, and A presses it all the same.
+    if active && plain.trim().is_empty() {
+        crate::widgets::target([x, y, w, h]);
+    }
     crate::widgets::narratable(|| narration([x, y, w, h]).hovered(hover));
     crate::widgets::widget_cursor(hover, active);
     let sprite = if !active {
@@ -1631,10 +1640,19 @@ impl EditBox {
     }
     /// Draw the field; `format` styles the visible text (command colouring).
     pub fn draw(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, format: Option<&Text>) {
+        self.draw_with_skin(batch, atlas, format, None);
+    }
+
+    pub fn draw_with_skin(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        format: Option<&Text>,
+        skin: Option<&str>,
+    ) {
         self.layout(atlas);
         crate::widgets::target_as(
-            self.frame
-                .unwrap_or([self.x, self.y, self.width, self.height]),
+            [self.x, self.y, self.width, self.height],
             crate::widgets::Kind::Field,
         );
         crate::widgets::narratable(|| {
@@ -1646,11 +1664,11 @@ impl EditBox {
             .focused(self.focused)
         });
         if self.bordered {
-            let sprite = if self.focused {
+            let sprite = skin.unwrap_or(if self.focused {
                 "gui/sprites/widget/text_field_highlighted"
             } else {
                 "gui/sprites/widget/text_field"
-            };
+            });
             nine_slice(
                 batch,
                 atlas,
@@ -1844,6 +1862,43 @@ mod tests {
         let offset = scroll_offset(40.0, 1_000) as i32 as f32;
         assert!(offset > 0.0);
         assert_eq!(scrolled_left(10.0, 40.0, 1_000), 10.0 - offset);
+    }
+
+    /// A controller reaches an icon button only through its target, and can't press a disabled one.
+    #[test]
+    fn an_active_icon_button_is_a_focus_target_and_a_disabled_one_is_not() {
+        let atlas = atlas();
+        let mut batch = HudBatch::new([640, 480]);
+        // Whatever this thread drew before is the last frame's, then gone.
+        crate::widgets::end_frame(u64::MAX - 1);
+        button(
+            &mut batch,
+            &atlas,
+            10.0,
+            20.0,
+            20.0,
+            20.0,
+            &Text::empty(),
+            true,
+            false,
+        );
+        button(
+            &mut batch,
+            &atlas,
+            40.0,
+            20.0,
+            20.0,
+            20.0,
+            &Text::empty(),
+            false,
+            false,
+        );
+        crate::widgets::end_frame(u64::MAX);
+        let targets: Vec<[f32; 4]> = crate::widgets::last_targets()
+            .iter()
+            .map(|t| t.rect)
+            .collect();
+        assert_eq!(targets, [[10.0, 20.0, 20.0, 20.0]]);
     }
 
     #[test]

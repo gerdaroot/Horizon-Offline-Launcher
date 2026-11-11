@@ -125,8 +125,10 @@ impl Game<'_> {
         self.options_from_title = from_title;
         self.options_to_game = false;
         let minecart_improvements = self.minecart_improvements();
+        let mods_live = self.mods_live_now();
         let ui = &mut self.ui.options;
         ui.open_at(!from_title && self.title.is_none(), page);
+        ui.mods_live = mods_live;
         ui.minecart_improvements = minecart_improvements;
         let root = self.options.resources.clone();
         ui.languages = lang::available(&[&root]);
@@ -221,7 +223,8 @@ impl Game<'_> {
             (true, None) => {
                 let was = window.fullscreen().is_some();
                 if !was {
-                    window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    let borderless = horizon_client::window::borderless_fullscreen(window);
+                    horizon_client::window::enter_fullscreen(window, borderless);
                 }
                 self.ui.options.calibration_fullscreen = Some(was);
             }
@@ -317,7 +320,7 @@ impl Game<'_> {
         let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
             [r.config.width as i32, r.config.height as i32]
         });
-        if self.ui.options.page() == Page::Video && self.has_control_down() {
+        if self.ui.options.video_open() && self.has_control_down() {
             // VideoSettingsScreen.mouseScrolled: Ctrl with the wheel steps the GUI scale.
             let mut ui = std::mem::take(&mut self.ui.options);
             let events = ui.video_wheel_gui_scale(&mut self.settings, framebuffer, amount);
@@ -346,6 +349,9 @@ impl Game<'_> {
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();
+                    self.switch_mods();
+                    self.sync_native_switches();
+                    self.sync_pregen_option();
                     self.sync_agent_control();
                     self.ui.options.agent_status = self.agent_status_lines();
                 }
@@ -373,7 +379,9 @@ impl Game<'_> {
                 Event::Close => {
                     self.settings.save(&Self::options_path());
                     let to_game = std::mem::take(&mut self.options_to_game);
-                    self.screen = if std::mem::take(&mut self.options_to_world_options) {
+                    self.screen = if let Some(screen) = self.panel.recipes_settings_return.take() {
+                        screen
+                    } else if std::mem::take(&mut self.options_to_world_options) {
                         Screen::WorldOptions
                     } else if self.options_from_title || to_game {
                         Screen::Playing
@@ -424,7 +432,25 @@ impl Game<'_> {
                     let _ = std::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }
+                Event::BrowseMods => {
+                    let ui = &mut self.ui.options.mod_browser;
+                    self.mods.jobs.browse(ui, Self::game_dir());
+                }
+                Event::InstallMod(id) => {
+                    let ui = &mut self.ui.options.mod_browser;
+                    self.mods.jobs.install(ui, Self::game_dir(), id);
+                }
+                // The website, through ConfirmLinkScreen as other links.
+                Event::OpenModPage(url) => self.confirm_trusted_link(&url, Screen::Options),
                 Event::ListShaderPacks => {
+                    let (key, _) = horizon_client::shader_pack_list::resolve(
+                        &Self::shader_packs_dir(),
+                        &self.settings.horizon.shader_pack,
+                    );
+                    if key != self.settings.horizon.shader_pack {
+                        self.settings.horizon.shader_pack = key;
+                        self.settings.save(&Self::options_path());
+                    }
                     self.settings.shader_packs =
                         horizon_client::shader_pack_list::scan(&Self::shader_packs_dir());
                 }
@@ -445,12 +471,19 @@ impl Game<'_> {
                 Event::NativeSettings(i) => self.native_settings_refresh(i),
                 Event::NativeButton(i, b) => self.native_settings_event(i, b),
                 Event::Credits => self.open_win_screen(false, super::win::Finish::Options),
+                Event::HudEditor => self.open_hud_editor(true),
                 // AccessibilityOptionsScreen's link button: ConfirmLinkScreen
                 // back to the options screen.
                 Event::AccessibilityHelp => {
                     self.confirm_trusted_link(ACCESSIBILITY_HELP_LINK, Screen::Options)
                 }
                 Event::Narrator => self.narrator_status_changed(),
+                Event::OpenStudioReplay(path) => {
+                    let path = path.to_string_lossy().to_string();
+                    if let Err(e) = self.open_studio_replay(&path) {
+                        log::warn!("Horizon Studio: could not open {path}: {e}");
+                    }
+                }
                 Event::OpenStudioFolder => {
                     let dir = std::path::PathBuf::from("recordings");
                     let _ = std::fs::create_dir_all(&dir);
@@ -484,8 +517,7 @@ impl Game<'_> {
             {
                 self.settings.video_modes = modes;
             }
-            let in_video_screen = self.screen == Screen::Options
-                && self.ui.options.page() == horizon_client::options_ui::Page::Video;
+            let in_video_screen = self.screen == Screen::Options && self.ui.options.video_open();
             let wanted = self.settings.fullscreen;
             let exclusive = self.settings.file.bool("exclusiveFullscreen");
             let preferred = self
@@ -605,8 +637,11 @@ impl Game<'_> {
             }
             if let Some(w) = &self.window {
                 let on = w.fullscreen().is_none();
-                w.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
-                if !on {
+                if on {
+                    let borderless = horizon_client::window::borderless_fullscreen(w);
+                    horizon_client::window::enter_fullscreen(w, borderless);
+                } else {
+                    w.set_fullscreen(None);
                     windowed_again(w);
                 }
             }
@@ -686,7 +721,7 @@ fn detected_controller_style(
     fallback: horizon_client::gamepad::GlyphStyle,
 ) -> horizon_client::gamepad::GlyphStyle {
     device.map_or(fallback, |d| {
-        horizon_client::gamepad::GlyphStyle::of_vendor(d.vendor)
+        horizon_client::gamepad::GlyphStyle::of_device(d.vendor, d.product)
     })
 }
 

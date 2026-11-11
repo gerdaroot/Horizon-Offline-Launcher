@@ -80,6 +80,38 @@ pub struct Ids {
     pub dropped_components: &'static [(u16, &'static str)],
     /// EntityDataSerializers' registration order (not a registry).
     pub entity_data_serializer: Remap,
+    /// What a client of the older version is shown in place of pinned entries it lacks.
+    pub substitutes: Substitutes,
+}
+
+/// For a server sending to an older client: pinned entries the older version lacks, each with the pinned
+/// entry that stands in for it there, as runs `(from, to, length)` in the pinned numbering (a stand-in is
+/// one the older version has). An entry in no run has none: what carries it is dropped or emptied.
+#[derive(Clone, Copy, Debug)]
+pub struct Substitutes {
+    pub block_state: &'static [(u16, u16, u16)],
+    pub block: &'static [(u16, u16, u16)],
+    pub item: &'static [(u16, u16, u16)],
+    pub entity_type: &'static [(u16, u16, u16)],
+    pub particle_type: &'static [(u16, u16, u16)],
+    pub sound_event: &'static [(u16, u16, u16)],
+}
+impl Substitutes {
+    pub const NONE: Self = Self {
+        block_state: &[],
+        block: &[],
+        item: &[],
+        entity_type: &[],
+        particle_type: &[],
+        sound_event: &[],
+    };
+}
+
+/// The older version's id of the pinned `id`, or of the entry standing in for it there (`substitutes`).
+pub fn down_or_substitute(remap: Remap, substitutes: &[(u16, u16, u16)], id: i32) -> Option<i32> {
+    remap
+        .down(id)
+        .or_else(|| remap.down(lookup(substitutes, id)?))
 }
 
 /// Layout differences inside structures the pinned readers decode while ids are renumbered up.
@@ -90,19 +122,25 @@ pub struct Quirks {
     /// `pot_decorations` is a list of up to four item ids, a brick for an undecorated side, instead of four
     /// optional item stack templates (26.2).
     pub pot_decorations_are_items: bool,
-    /// `jukebox_playable` is an EitherHolder (a flag, then a song's key or holder) instead of a holder, and
-    /// `damage_resistant` a bare damage type tag instead of a HolderSet (1.21.11).
-    pub either_holder_song_and_tag_resistance: bool,
+    /// `damage_type`, `instrument`, `provides_trim_material`, `jukebox_playable`, `chicken/variant` and
+    /// `zombie_nautilus/variant` are EitherHolders (a flag, then an entry's holder or key) instead of
+    /// holders, and `damage_resistant` a bare damage type tag instead of a HolderSet (1.21.11).
+    pub either_holders_and_tag_resistance: bool,
     /// `use_remainder` holds an ItemStack and `container` a list of optional ones (a count first, 0 for
     /// none) instead of item stack templates (1.21.11).
     pub stacks_in_components: bool,
+    /// Before 1.21.6 an `attribute_modifiers` entry has no display, and `equippable` has neither
+    /// `can_be_sheared` nor `shearing_sound` (1.21.6 added them). Read: the pinned layout with no display,
+    /// false and the shears' sound. Written: left out.
+    pub components_before_1_21_6: bool,
 }
 impl Quirks {
     pub const NONE: Self = Self {
         tag_slot_display_is_id: false,
         pot_decorations_are_items: false,
-        either_holder_song_and_tag_resistance: false,
+        either_holders_and_tag_resistance: false,
         stacks_in_components: false,
+        components_before_1_21_6: false,
     };
 }
 
@@ -121,6 +159,15 @@ pub fn pinned() -> Guard {
 pub fn quirks() -> Quirks {
     match ACTIVE.get() {
         Some((ids, Way::Up)) => ids.quirks,
+        _ => Quirks::NONE,
+    }
+}
+
+/// The older version's quirks while packets are encoded for it on this thread (an older client, or what is
+/// sent to an older server); none otherwise. The writers then lay those structures out as it reads them.
+pub fn quirks_written() -> Quirks {
+    match ACTIVE.get() {
+        Some((ids, Way::Down)) => ids.quirks,
         _ => Quirks::NONE,
     }
 }
@@ -170,9 +217,15 @@ fn apply(id: i32, pick: impl Fn(&Ids) -> Remap) -> i32 {
     }
 }
 
-/// An item id as read or about to be written on this thread.
+/// An item id as read or about to be written on this thread. Written for an older client, an item it
+/// lacks becomes its stand-in.
 pub fn item(id: i32) -> i32 {
-    apply(id, |ids| ids.item)
+    match ACTIVE.get() {
+        Some((ids, Way::Down)) => {
+            down_or_substitute(ids.item, ids.substitutes.item, id).unwrap_or(-1)
+        }
+        _ => apply(id, |ids| ids.item),
+    }
 }
 /// A data component type id as read or about to be written on this thread.
 pub fn component(id: i32) -> i32 {
@@ -206,6 +259,11 @@ pub fn entity_type(id: i32) -> i32 {
 /// A sound event id as read or about to be written on this thread.
 pub fn sound_event(id: i32) -> i32 {
     apply(id, |ids| ids.sound_event)
+}
+/// An attribute id (the registry id, not the holder's id plus one) as read or about to be written on this
+/// thread.
+pub fn attribute(id: i32) -> i32 {
+    apply(id, |ids| ids.attribute)
 }
 /// An entity data serializer id as read on this thread.
 pub fn entity_data_serializer(id: i32) -> i32 {
@@ -351,6 +409,53 @@ mod tests {
     }
 
     #[test]
+    fn registry_entries_in_1_21_11_components_are_either_holders() {
+        use crate::buf::{Codec, Reader};
+        use crate::item::{Component, Slot, component as k};
+        let ids = crate::adapter::ServerVersion::V1_21_11.ids().unwrap();
+        let older = |kind: i32| {
+            let id = ids.data_component_type.down(kind).unwrap();
+            assert!((0..128).contains(&id));
+            id as u8
+        };
+        let read = |sent: &[u8]| {
+            let _up = renumbering(ids, Way::Up);
+            let mut r = Reader::new(sent);
+            let stack = Slot::read(&mut r).unwrap().unwrap();
+            assert_eq!(r.remaining(), 0);
+            stack
+        };
+        // Stone (1 in both) as a 1.21.11 server sends a stack whose instrument, provides_trim_material,
+        // damage_type, chicken/variant and zombie_nautilus/variant are held: the flag set, then the
+        // holder as 26.3 reads it (an id plus one, or a registry id).
+        let mut sent = vec![1, 1, 5, 0];
+        sent.extend([older(k::INSTRUMENT), 1, 2]);
+        sent.extend([older(k::PROVIDES_TRIM_MATERIAL), 1, 5]);
+        sent.extend([older(k::DAMAGE_TYPE), 1, 3]);
+        sent.extend([older(k::CHICKEN_VARIANT), 1, 2]);
+        sent.extend([older(k::ZOMBIE_NAUTILUS_VARIANT), 1, 0]);
+        let stack = read(&sent);
+        let kinds: Vec<i32> = stack.added.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                k::INSTRUMENT,
+                k::PROVIDES_TRIM_MATERIAL,
+                k::DAMAGE_TYPE,
+                k::CHICKEN_VARIANT,
+                k::ZOMBIE_NAUTILUS_VARIANT,
+            ]
+        );
+        assert_eq!(stack.added[0].1, Component::Instrument(1));
+        // An instrument named by its key has no pinned holder: the component goes, the rest reads on.
+        let mut sent = vec![1, 1, 2, 0, older(k::INSTRUMENT), 0, 26];
+        sent.extend(b"minecraft:ponder_goat_horn");
+        sent.extend([older(k::CHICKEN_VARIANT), 1, 2]);
+        let kinds: Vec<i32> = read(&sent).added.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, [k::CHICKEN_VARIANT]);
+    }
+
+    #[test]
     fn items_inside_components_take_the_pinned_ids_and_layout() {
         use crate::buf::{Codec, Reader};
         use crate::item::{Component, Slot};
@@ -394,6 +499,133 @@ mod tests {
         {
             let _down = renumbering(ids, Way::Down);
             Slot::write(&Some(Stack::new(1012, 3)), &mut w);
+        }
+        assert_eq!(w.data, sent);
+    }
+
+    #[test]
+    fn modifiers_and_equippables_before_1_21_6_are_read_in_the_pinned_layout() {
+        use crate::buf::{Codec, Reader, Writer};
+        use crate::item::{Component, Slot, Stack, component as k};
+        let ids = crate::adapter::ServerVersion::V1_21_5.ids().unwrap();
+        let raw = |kind: i32| ids.data_component_type.down(kind).unwrap();
+        // A stone as 1.21.5 sends it, with two attribute modifiers (holders: armor is 0 in 1.21.5, 1 in
+        // 26.3, so the holder is its id plus one, 1 and 3; attack damage is 2 and 3 in 26.3, so 3 and 4)
+        // and an equippable for the chest: no display, no shearing fields.
+        let mut sent = Writer::new();
+        sent.varint(1);
+        sent.varint(1);
+        sent.varint(2);
+        sent.varint(0);
+        sent.varint(raw(k::ATTRIBUTE_MODIFIERS));
+        sent.varint(2);
+        for (holder, id, amount, operation, slot) in [
+            (1, "minecraft:test", 2.5, 0, 6),
+            (3, "minecraft:other", -1.0, 1, 1),
+        ] {
+            sent.varint(holder);
+            sent.string(id);
+            sent.f64(amount);
+            sent.varint(operation);
+            sent.varint(slot);
+        }
+        sent.varint(raw(k::EQUIPPABLE));
+        sent.varint(3);
+        sent.varint(71);
+        for b in [false, false, false, true, true, true, false] {
+            sent.bool(b);
+        }
+        let sent = sent.data;
+        let stack: Stack = {
+            let _up = renumbering(ids, Way::Up);
+            Slot::read(&mut Reader::new(&sent)).unwrap().unwrap()
+        };
+        assert_eq!(stack.item, 1);
+        // The pinned layout: each entry with a default display, then the shears' sound by default.
+        let mut modifiers = Writer::new();
+        modifiers.varint(2);
+        for (holder, id, amount, operation, slot) in [
+            (2, "minecraft:test", 2.5, 0, 6),
+            (4, "minecraft:other", -1.0, 1, 1),
+        ] {
+            modifiers.varint(holder);
+            modifiers.string(id);
+            modifiers.f64(amount);
+            modifiers.varint(operation);
+            modifiers.varint(slot);
+            modifiers.varint(0);
+        }
+        let mut equippable = Writer::new();
+        equippable.varint(3);
+        equippable.varint(71);
+        for b in [false, false, false, true, true, true, false, false] {
+            equippable.bool(b);
+        }
+        equippable.varint(1448);
+        assert_eq!(
+            stack.added,
+            [
+                (k::ATTRIBUTE_MODIFIERS, Component::Raw(modifiers.data)),
+                (k::EQUIPPABLE, Component::Raw(equippable.data)),
+            ]
+        );
+        // Written for the 1.21.5 client again: the same bytes as it sent.
+        let mut w = Writer::new();
+        {
+            let _down = renumbering(ids, Way::Down);
+            Slot::write(&Some(stack), &mut w);
+        }
+        assert_eq!(w.data, sent);
+    }
+
+    #[test]
+    fn modifiers_and_equippables_from_1_21_6_are_kept_as_they_are() {
+        use crate::buf::{Codec, Reader, Writer};
+        use crate::item::{Slot, component as k};
+        use crate::text::literal;
+        // The pinned layout (1.21.6 and later): a display after each entry's slot, and the shearing fields.
+        // No quirk applies to this version, so the bytes pass through unchanged, and the ids are the
+        // version's own.
+        let ids = crate::adapter::ServerVersion::V1_21_6.ids().unwrap();
+        let raw = |kind: i32| ids.data_component_type.down(kind).unwrap();
+        let mut sent = Writer::new();
+        sent.varint(1);
+        sent.varint(1);
+        sent.varint(2);
+        sent.varint(0);
+        sent.varint(raw(k::ATTRIBUTE_MODIFIERS));
+        sent.varint(1);
+        sent.varint(2);
+        sent.string("minecraft:test");
+        sent.f64(2.5);
+        sent.varint(0);
+        sent.varint(6);
+        sent.varint(2);
+        sent.nbt(&literal("Hi"));
+        sent.varint(raw(k::EQUIPPABLE));
+        sent.varint(3);
+        sent.varint(71);
+        for b in [false, false, false, true, true, true, false, false] {
+            sent.bool(b);
+        }
+        sent.varint(1448);
+        let sent = sent.data;
+        let stack = {
+            let _up = renumbering(ids, Way::Up);
+            Slot::read(&mut Reader::new(&sent)).unwrap().unwrap()
+        };
+        assert_eq!(
+            stack
+                .added
+                .iter()
+                .map(|(kind, _)| *kind)
+                .collect::<Vec<_>>(),
+            [k::ATTRIBUTE_MODIFIERS, k::EQUIPPABLE]
+        );
+        let mut w = Writer::new();
+        {
+            let _down = renumbering(ids, Way::Down);
+            Slot::write(&Some(stack), &mut w);
         }
         assert_eq!(w.data, sent);
     }

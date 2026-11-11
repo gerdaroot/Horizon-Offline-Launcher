@@ -416,8 +416,14 @@ impl Launcher {
             }
         }
         // `HORIZON_LAUNCHER_PROJECT=<slug>` (with `HORIZON_LAUNCHER_PAGE=mods`): opens that
-        // project's page once a search finds it, for screenshots.
-        if self.mods.browse.open.is_none() {
+        // project's page once a search finds it, for screenshots. Once per run, kept in a flag
+        // rather than by removing the variable: `remove_var` races `getenv` on the download, check
+        // and keyring threads running by now (unsound, and `unsafe` from edition 2024).
+        static PROJECT_OPENED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if self.mods.browse.open.is_none()
+            && !PROJECT_OPENED.load(std::sync::atomic::Ordering::Relaxed)
+        {
             if let Ok(want) = std::env::var("HORIZON_LAUNCHER_PROJECT") {
                 if let Some(p) = self
                     .mods
@@ -426,7 +432,7 @@ impl Launcher {
                     .find(|p| p.id == want || p.slug == want)
                     .cloned()
                 {
-                    std::env::remove_var("HORIZON_LAUNCHER_PROJECT");
+                    PROJECT_OPENED.store(true, std::sync::atomic::Ordering::Relaxed);
                     self.mods_open(p);
                 }
             }
@@ -482,13 +488,19 @@ impl Launcher {
         let (tx, search) = (m.tx.clone(), m.search);
         std::thread::spawn(move || {
             let result = browser::source(source)
-                .ok_or_else(|| format!("{} isn't set up.", source.label()))
+                .ok_or_else(|| trf("{source} isn't set up.", &[("source", source.label())]))
                 .and_then(|s| s.search(&query));
             let about: HashMap<String, Vec<String>> = match (&result, source) {
-                (Ok(found), SourceId::Horizon) => found
-                    .iter()
-                    .map(|p| (p.id.clone(), horizon::trust_and_capabilities(&p.id)))
-                    .collect(),
+                (Ok(found), SourceId::Horizon) => {
+                    let instance = horizon_launcher::instances::selected();
+                    found
+                        .iter()
+                        .map(|p| {
+                            let lines = horizon::trust_and_capabilities(&p.id, Some(&instance));
+                            (p.id.clone(), lines)
+                        })
+                        .collect()
+                }
                 _ => HashMap::new(),
             };
             let _ = tx.send(Event::Found(search, offset, result));
@@ -551,6 +563,11 @@ impl Launcher {
     /// in a Java instance, renames its file.
     pub(super) fn mods_switch(&mut self, e: &installed::Entry) {
         let home = self.mods.home();
+        // An update holds the folder: the window doesn't wait for it.
+        let Some(_lock) = browser::try_lock_home(&home) else {
+            self.mods.message = Some(Err(tr("Wait for the current operation to finish.").into()));
+            return;
+        };
         if self.mods.java.is_some() {
             let on = !java_instance::is_on(&home, e);
             self.mods.message = Some(java_instance::set_on(&home, e, on).map(|()| {
@@ -613,7 +630,9 @@ impl Launcher {
                     s.spawn(|| {
                         while let Some(p) = queue.lock().ok().and_then(|mut q| q.next()) {
                             let result = browser::source(p.source)
-                                .ok_or_else(|| format!("{} isn't set up.", p.source.label()))
+                                .ok_or_else(|| {
+                                    trf("{source} isn't set up.", &[("source", p.source.label())])
+                                })
                                 .and_then(|source| {
                                     java::check_project(&home, &*source, &p, everything, &|_| {})
                                 });
@@ -698,7 +717,7 @@ impl Launcher {
                     ));
                 };
                 let updated = browser::source(source_id)
-                    .ok_or_else(|| format!("{} isn't set up", source_id.label()))
+                    .ok_or_else(|| trf("{source} isn't set up.", &[("source", source_id.label())]))
                     .and_then(|source| {
                         let p = source.project(&id)?;
                         match &java {
@@ -779,7 +798,7 @@ impl Launcher {
             };
             let mut modpack = false;
             let result = browser::source(source)
-                .ok_or_else(|| format!("{} isn't set up.", source.label()))
+                .ok_or_else(|| trf("{source} isn't set up.", &[("source", source.label())]))
                 .and_then(|source| {
                     let p = match known {
                         Some(p) => p,
@@ -791,24 +810,28 @@ impl Launcher {
                             .iter()
                             .map(|e| format!("{} {}", e.title, e.number))
                             .collect();
-                        return Ok(format!(
-                            "Installed {}, checksums checked.",
-                            names.join(", ")
+                        return Ok(trf(
+                            "Installed {mods}, checksums checked.",
+                            &[("mods", &names.join(", "))],
                         ));
                     }
                     if p.kind == PackKind::DataPack {
-                        let (world, name) =
-                            world.ok_or("Pick the world the data pack goes into first.")?;
+                        let (world, name) = world.ok_or_else(|| {
+                            tr("Pick the world the data pack goes into first.").to_string()
+                        })?;
                         let done =
                             installed::install_datapack(&*source, &p, everything, &world, &|f| {
                                 progress(&p.title, f)
                             })?;
-                        return Ok(format!(
-                            "Put {} {} in {name}'s data packs, checksum checked: the game turns \
-                             it on when the world opens. {}",
-                            p.title,
-                            done.number,
-                            done.coverage.summary()
+                        return Ok(trf(
+                            "Put {pack} {version} in {world}'s data packs, checksum checked: the \
+                             game turns it on when the world opens. {coverage}",
+                            &[
+                                ("pack", &p.title),
+                                ("version", &done.number),
+                                ("world", &name),
+                                ("coverage", &done.coverage.summary()),
+                            ],
                         ));
                     }
                     modpack = p.kind == PackKind::Modpack;
@@ -820,12 +843,14 @@ impl Launcher {
                                 url,
                             );
                         }
-                        return Ok(format!(
-                            "Installed {} {} as its own profile with {}, each checked. Play it \
-                             from the list above.",
-                            pack.name,
-                            pack.version,
-                            pack.mods.join(", ")
+                        return Ok(trf(
+                            "Installed {pack} {version} as its own profile with {mods}, each \
+                             checked. Play it from the list above.",
+                            &[
+                                ("pack", &pack.name),
+                                ("version", &pack.version),
+                                ("mods", &pack.mods.join(", ")),
+                            ],
                         ));
                     }
                     if modpack {
@@ -842,8 +867,9 @@ impl Launcher {
                             );
                         }
                         return Ok(format!(
-                            "{} Play it from the list above.",
-                            modpacks::outcome(&pack)
+                            "{} {}",
+                            modpacks::outcome(&pack),
+                            tr("Play it from the list above.")
                         ));
                     }
                     let done = installed::install(&*source, &p, everything, &home, &progress)?;
@@ -851,36 +877,40 @@ impl Launcher {
                         .iter()
                         .map(|e| format!("{} {}", e.title, e.number))
                         .collect();
+                    let mods = names.join(", ");
                     if done.iter().any(|e| native_status::is_native_file(&e.file)) {
-                        return Ok(format!(
-                            "Installed {} into {instance}. Build to play with it.",
-                            names.join(", ")
+                        return Ok(trf(
+                            "Installed {mods} into {instance}. Build to play with it.",
+                            &[("mods", &mods), ("instance", &instance)],
                         ));
                     }
                     if p.source == SourceId::Horizon && p.kind == PackKind::Mod {
-                        return Ok(format!(
-                            "Installed {} into horizon-mods and turned it on, checksum checked \
-                             (Options > Mods in the game).",
-                            names.join(", ")
+                        return Ok(trf(
+                            "Installed {mods} into horizon-mods and turned it on, checksum \
+                             checked (Options > Mods in the game).",
+                            &[("mods", &mods)],
                         ));
                     }
                     if p.kind == PackKind::Mod {
                         let skipped = done.last().map_or(0, |e| e.skipped.len());
-                        return Ok(format!(
-                            "Ported {} into horizon-mods and turned on (Options > Mods in the \
-                             game).{}",
-                            names.join(", "),
-                            if skipped > 0 {
-                                " What didn't port is listed under Installed."
-                            } else {
-                                ""
-                            }
-                        ));
+                        let ported = trf(
+                            "Ported {mods} into horizon-mods and turned on (Options > Mods in \
+                             the game).",
+                            &[("mods", &mods)],
+                        );
+                        return Ok(if skipped > 0 {
+                            format!(
+                                "{ported} {}",
+                                tr("What didn't port is listed under Installed.")
+                            )
+                        } else {
+                            ported
+                        });
                     }
-                    Ok(format!(
-                        "Installed {}, checksums checked. Turn it on in the game: Options > \
-                         Resource Packs.",
-                        names.join(", ")
+                    Ok(trf(
+                        "Installed {mods}, checksums checked. Turn it on in the game: Options \
+                         > Resource Packs.",
+                        &[("mods", &mods)],
                     ))
                 });
             let _ = tx.send(Event::Done(result, modpack));
@@ -1013,6 +1043,12 @@ impl Launcher {
     /// The project `id` leaves the selected instance now; what happened, for the page's notice.
     pub(super) fn mods_remove(&mut self, id: &str) -> Result<String, String> {
         let home = self.mods.home();
+        let Some(_lock) = browser::try_lock_home(&home) else {
+            let busy: Result<String, String> =
+                Err(tr("Wait for the current operation to finish.").into());
+            self.mods.message = Some(busy.clone());
+            return busy;
+        };
         let removed = match self.mods.java {
             Some(_) => java_instance::remove(&home, id),
             None => installed::remove(&home, id),
@@ -1456,21 +1492,24 @@ impl Launcher {
             let detail = div()
                 .flex()
                 .flex_col()
-                .child(format!(
-                    "{}{} · {}{} · {}",
+                .child({
+                    let from = e
+                        .source
+                        .shown_for(&e.project)
+                        .map(|s| trf("from {source}", &[("source", s)]));
+                    let needed = e
+                        .dependency
+                        .then(|| tr("needed by another pack").to_string());
+                    let origin: Vec<String> = from.into_iter().chain(needed).collect();
                     e.verdict
-                        .as_ref()
-                        .map(|v| format!("{} · ", tr(v)))
-                        .unwrap_or_default(),
-                    e.number,
-                    trf("from {source}", &[("source", e.source.label())]),
-                    if e.dependency {
-                        format!(", {}", tr("needed by another pack"))
-                    } else {
-                        String::new()
-                    },
-                    e.file
-                ))
+                        .iter()
+                        .map(|v| tr(v).to_string())
+                        .chain([e.number.clone()])
+                        .chain((!origin.is_empty()).then(|| origin.join(", ")))
+                        .chain([e.file.clone()])
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                })
                 .children(instance.as_ref().filter(|_| is_native).map(|name| {
                     div()
                         .text_color(t.ink)
@@ -1646,6 +1685,9 @@ impl Launcher {
                 ),
             };
             detail = detail.child(div().text_color(t.muted).child(said));
+            for left in &build.left_out {
+                detail = detail.child(div().text_color(t.warn).child(left.label()));
+            }
         }
         if self.native_step.is_some() && !mine {
             let other = self
@@ -1848,7 +1890,9 @@ impl Launcher {
                 by.push(trf("by {author}", &[("author", &p.author)]));
             }
             by.push(trf("{count} downloads", &[("count", &count(p.downloads))]));
-            by.push(trf("from {source}", &[("source", p.source.label())]));
+            if let Some(source) = p.source.shown_for(&p.id) {
+                by.push(trf("from {source}", &[("source", source)]));
+            }
             if !p.license.is_empty() {
                 by.push(p.license.clone());
             }

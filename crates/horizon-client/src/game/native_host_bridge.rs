@@ -5,16 +5,15 @@
 //! (docs/native-mods.md, "Trait mods"). Each goes through the helper or the
 //! state the game's own code uses, so both answer alike.
 use super::Game;
+use horizon_client::actions::Action;
 use horizon_client::{
     containers::{BlockEntity, ModBlockEntity},
     items::ItemStack,
     particles::ParticleOptions,
 };
 use horizon_world::{player_inventory::EquipmentSlot, registry::BlockStateId};
-use winit::keyboard::KeyCode;
 
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// A copy of the mod block entity at `pos`, to read without changing it:
     /// a press reading the basin under it, a client mod drawing a machine
@@ -53,7 +52,7 @@ impl Game<'_> {
     /// entity's tick. `source` is the `SoundSource` ordinal (4 for
     /// `BLOCKS`). True when queued, not heard; false off a server and where
     /// the level host's `play_sound` refuses. API @API:host_bridge@.
-    pub(super) fn native_level_play_sound(
+    pub(super) fn native_play_sound_in_place(
         &mut self,
         sound: &str,
         at: [f64; 3],
@@ -73,7 +72,7 @@ impl Game<'_> {
     /// moving `speed` along `spread`). `state` is the block of block
     /// particles. True when accepted; false off a server and where the level
     /// host's `send_particles` refuses. API @API:host_bridge@.
-    pub(super) fn native_level_send_particles(
+    pub(super) fn native_send_particles_in_place(
         &mut self,
         options: &ParticleOptions,
         state: Option<BlockStateId>,
@@ -117,7 +116,7 @@ impl Game<'_> {
     /// (`as_guest` holds sneak for them); on a client the player's own key.
     /// API @API:host_bridge@.
     pub(super) fn native_sneaking(&self) -> bool {
-        self.keys.contains(&KeyCode::ShiftLeft)
+        self.keys.held(Action::Sneak)
     }
 }
 

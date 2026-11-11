@@ -4,19 +4,37 @@
 //! and renumbers what goes through it. [`ids`] renumbers the registry ids inside packets as the shared
 //! readers decode them, and `translate` rewrites the packets whose layout changed. An older version is
 //! translated a release at a time (26.1 to 26.2, then 26.2 to 26.3), with its ids mapped straight to the
-//! pinned ones.
+//! pinned ones. A Horizon server runs the ids the other way for a client of an older release
+//! ([`ClientSession`], roadmap `older-clients`), when its owner lets such clients join.
+pub mod client_session;
 pub mod ids;
+pub mod layout_26_2;
 pub mod session;
 mod translate;
+pub mod v1_20_6;
+mod v1_20_6_ids;
+pub mod v1_21_1;
 pub mod v1_21_10;
 mod v1_21_10_ids;
 pub mod v1_21_11;
 mod v1_21_11_ids;
+mod v1_21_1_ids;
+pub mod v1_21_3;
+mod v1_21_3_ids;
+pub mod v1_21_4;
+mod v1_21_4_ids;
+pub mod v1_21_5;
+mod v1_21_5_ids;
+pub mod v1_21_6;
+mod v1_21_6_ids;
+pub mod v1_21_8;
+mod v1_21_8_ids;
 pub mod v26_1_2;
 mod v26_1_2_ids;
 pub mod v26_2;
 mod v26_2_ids;
 
+pub use client_session::ClientSession;
 pub use session::Session;
 
 use crate::{
@@ -36,16 +54,34 @@ pub enum ServerVersion {
     V1_21_11,
     /// 1.21.9 and 1.21.10: one protocol.
     V1_21_10,
+    /// 1.21.7 and 1.21.8: one protocol.
+    V1_21_8,
+    V1_21_6,
+    V1_21_5,
+    V1_21_4,
+    /// 1.21.2 and 1.21.3: one protocol.
+    V1_21_3,
+    /// 1.21 and 1.21.1: one protocol.
+    V1_21_1,
+    /// 1.20.5 and 1.20.6: one protocol.
+    V1_20_6,
 }
 
 impl ServerVersion {
     /// Newest first.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 12] = [
         Self::Current,
         Self::V26_2,
         Self::V26_1,
         Self::V1_21_11,
         Self::V1_21_10,
+        Self::V1_21_8,
+        Self::V1_21_6,
+        Self::V1_21_5,
+        Self::V1_21_4,
+        Self::V1_21_3,
+        Self::V1_21_1,
+        Self::V1_20_6,
     ];
 
     /// Whether this is `other` or an older release: the translation steps from `other` up apply.
@@ -62,6 +98,13 @@ impl ServerVersion {
             Self::V26_1 => v26_1_2::PROTOCOL,
             Self::V1_21_11 => v1_21_11::PROTOCOL,
             Self::V1_21_10 => v1_21_10::PROTOCOL,
+            Self::V1_21_8 => v1_21_8::PROTOCOL,
+            Self::V1_21_5 => v1_21_5::PROTOCOL,
+            Self::V1_20_6 => v1_20_6::PROTOCOL,
+            Self::V1_21_1 => v1_21_1::PROTOCOL,
+            Self::V1_21_3 => v1_21_3::PROTOCOL,
+            Self::V1_21_4 => v1_21_4::PROTOCOL,
+            Self::V1_21_6 => v1_21_6::PROTOCOL,
         }
     }
 
@@ -73,6 +116,13 @@ impl ServerVersion {
             Self::V26_1 => "26.1",
             Self::V1_21_11 => v1_21_11::NAME,
             Self::V1_21_10 => "1.21.10",
+            Self::V1_21_8 => v1_21_8::NAME,
+            Self::V1_21_5 => v1_21_5::NAME,
+            Self::V1_20_6 => v1_20_6::NAME,
+            Self::V1_21_1 => v1_21_1::NAME,
+            Self::V1_21_3 => v1_21_3::NAME,
+            Self::V1_21_4 => v1_21_4::NAME,
+            Self::V1_21_6 => v1_21_6::NAME,
         }
     }
 
@@ -100,15 +150,21 @@ impl ServerVersion {
         const BEFORE_26_3: ids::Quirks = ids::Quirks {
             tag_slot_display_is_id: true,
             pot_decorations_are_items: true,
-            either_holder_song_and_tag_resistance: false,
+            either_holders_and_tag_resistance: false,
             stacks_in_components: false,
+            components_before_1_21_6: false,
         };
-        // Before 26.1 a jukebox song was an EitherHolder, damage resistance a tag, and the items components
-        // hold ItemStacks.
+        // Before 26.1 registry entries in components (a jukebox song, an instrument, a trim material...)
+        // were EitherHolders, damage resistance a tag, and the items components hold ItemStacks.
         const BEFORE_26_1: ids::Quirks = ids::Quirks {
-            either_holder_song_and_tag_resistance: true,
+            either_holders_and_tag_resistance: true,
             stacks_in_components: true,
             ..BEFORE_26_3
+        };
+        // Before 1.21.6 attribute modifiers have no display, and equippables no shearing fields.
+        const BEFORE_1_21_6: ids::Quirks = ids::Quirks {
+            components_before_1_21_6: true,
+            ..BEFORE_26_1
         };
         static V26_2: ids::Ids = ids::Ids {
             quirks: BEFORE_26_3,
@@ -160,18 +216,234 @@ impl ServerVersion {
             },
             ..v1_21_10_ids::IDS
         };
+        static V1_21_8: ids::Ids = ids::Ids {
+            quirks: BEFORE_26_1,
+            // 1.21.9 dropped the NBT serializer (16) and added the copper golem, weathering copper and
+            // resolvable profile ones (from the wiki's entity metadata lists).
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 4),
+                    (21, 20, 2),
+                    (23, 23, 1),
+                    (24, 25, 4),
+                    (28, 30, 1),
+                    (29, 33, 4),
+                    (33, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 4),
+                    (20, 21, 2),
+                    (23, 23, 1),
+                    (25, 24, 4),
+                    (30, 28, 1),
+                    (33, 29, 4),
+                    (39, 33, 2),
+                ],
+            },
+            ..v1_21_8_ids::IDS
+        };
+        static V1_21_6: ids::Ids = ids::Ids {
+            quirks: BEFORE_26_1,
+            // 1.21.9 dropped the NBT serializer (16) and added the copper golem, weathering copper and
+            // resolvable profile ones (from the wiki's entity metadata lists).
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 4),
+                    (21, 20, 2),
+                    (23, 23, 1),
+                    (24, 25, 4),
+                    (28, 30, 1),
+                    (29, 33, 4),
+                    (33, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 4),
+                    (20, 21, 2),
+                    (23, 23, 1),
+                    (25, 24, 4),
+                    (30, 28, 1),
+                    (33, 29, 4),
+                    (39, 33, 2),
+                ],
+            },
+            ..v1_21_6_ids::IDS
+        };
+        static V1_21_5: ids::Ids = ids::Ids {
+            quirks: BEFORE_1_21_6,
+            // 1.21.9 dropped the NBT serializer (16) and added the copper golem, weathering copper and
+            // resolvable profile ones (from the wiki's entity metadata lists).
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 4),
+                    (21, 20, 2),
+                    (23, 23, 1),
+                    (24, 25, 4),
+                    (28, 30, 1),
+                    (29, 33, 4),
+                    (33, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 4),
+                    (20, 21, 2),
+                    (23, 23, 1),
+                    (25, 24, 4),
+                    (30, 28, 1),
+                    (33, 29, 4),
+                    (39, 33, 2),
+                ],
+            },
+            ..v1_21_5_ids::IDS
+        };
+        static V1_21_4: ids::Ids = ids::Ids {
+            quirks: V1_21_5.quirks,
+            // As 1.21.5's, without the cow, wolf sound, pig and chicken variants 1.21.5 added.
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 6),
+                    (23, 25, 1),
+                    (24, 27, 1),
+                    (25, 33, 4),
+                    (29, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 6),
+                    (25, 23, 1),
+                    (27, 24, 1),
+                    (33, 25, 4),
+                    (39, 29, 2),
+                ],
+            },
+            ..v1_21_4_ids::IDS
+        };
+        static V1_21_3: ids::Ids = ids::Ids {
+            quirks: V1_21_5.quirks,
+            // As 1.21.5's, without the cow, wolf sound, pig and chicken variants 1.21.5 added.
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 6),
+                    (23, 25, 1),
+                    (24, 27, 1),
+                    (25, 33, 4),
+                    (29, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 6),
+                    (25, 23, 1),
+                    (27, 24, 1),
+                    (33, 25, 4),
+                    (39, 29, 2),
+                ],
+            },
+            ..v1_21_3_ids::IDS
+        };
+        static V1_21_1: ids::Ids = ids::Ids {
+            quirks: V1_21_5.quirks,
+            // As 1.21.5's, without the cow, wolf sound, pig and chicken variants 1.21.5 added.
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 6),
+                    (23, 25, 1),
+                    (24, 27, 1),
+                    (25, 33, 4),
+                    (29, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 6),
+                    (25, 23, 1),
+                    (27, 24, 1),
+                    (33, 25, 4),
+                    (39, 29, 2),
+                ],
+            },
+            ..v1_21_1_ids::IDS
+        };
+        static V1_20_6: ids::Ids = ids::Ids {
+            quirks: V1_21_5.quirks,
+            // As 1.21.5's, without the cow, wolf sound, pig and chicken variants 1.21.5 added.
+            entity_data_serializer: ids::Remap::Runs {
+                up: &[
+                    (0, 0, 16),
+                    (17, 16, 6),
+                    (23, 25, 1),
+                    (24, 27, 1),
+                    (25, 33, 4),
+                    (29, 39, 2),
+                ],
+                down: &[
+                    (0, 0, 16),
+                    (16, 17, 6),
+                    (25, 23, 1),
+                    (27, 24, 1),
+                    (33, 25, 4),
+                    (39, 29, 2),
+                ],
+            },
+            ..v1_20_6_ids::IDS
+        };
         match self {
             Self::Current => None,
             Self::V26_2 => Some(&V26_2),
             Self::V26_1 => Some(&V26_1),
             Self::V1_21_11 => Some(&V1_21_11),
             Self::V1_21_10 => Some(&V1_21_10),
+            Self::V1_21_8 => Some(&V1_21_8),
+            Self::V1_21_5 => Some(&V1_21_5),
+            Self::V1_20_6 => Some(&V1_20_6),
+            Self::V1_21_1 => Some(&V1_21_1),
+            Self::V1_21_3 => Some(&V1_21_3),
+            Self::V1_21_4 => Some(&V1_21_4),
+            Self::V1_21_6 => Some(&V1_21_6),
         }
     }
 
+    /// The id a client of this version knows a packet a Horizon server sends as `id` by: the inverse of
+    /// [`Self::clientbound_id`]. `None` when that client has no such packet, so it must not be sent.
+    pub fn clientbound_id_down(self, state: State, id: i32) -> Option<i32> {
+        self.inverse(state, Direction::Clientbound, id)
+    }
+
+    /// The pinned version's id for a packet a client of this version sent as `id`: the inverse of
+    /// [`Self::serverbound_id`]. `None` when the pinned version has no such packet.
+    pub fn serverbound_id_up(self, state: State, id: i32) -> Option<i32> {
+        self.inverse(state, Direction::Serverbound, id)
+    }
+
+    fn inverse(self, state: State, direction: Direction, id: i32) -> Option<i32> {
+        if self == Self::Current {
+            return Some(id);
+        }
+        let at = self
+            .table(state, direction)
+            .iter()
+            .position(|&m| m.map(i32::from) == Some(id))?;
+        i32::try_from(at).ok()
+    }
+
     fn map(self, state: State, direction: Direction, id: i32) -> Option<i32> {
-        let table = match (self, direction) {
-            (Self::Current, _) => return Some(id),
+        if self == Self::Current {
+            return Some(id);
+        }
+        let mapped = *self
+            .table(state, direction)
+            .get(usize::try_from(id).ok()?)?;
+        mapped.map(i32::from)
+    }
+
+    fn table(self, state: State, direction: Direction) -> &'static [Option<u8>] {
+        match (self, direction) {
+            (Self::Current, _) => &[],
             (Self::V26_2, Direction::Clientbound) => v26_2::clientbound(state),
             (Self::V26_2, Direction::Serverbound) => v26_2::serverbound(state),
             (Self::V26_1, Direction::Clientbound) => v26_1_2::clientbound(state),
@@ -180,9 +452,21 @@ impl ServerVersion {
             (Self::V1_21_11, Direction::Serverbound) => v1_21_11::serverbound(state),
             (Self::V1_21_10, Direction::Clientbound) => v1_21_10::clientbound(state),
             (Self::V1_21_10, Direction::Serverbound) => v1_21_10::serverbound(state),
-        };
-        let mapped = *table.get(usize::try_from(id).ok()?)?;
-        mapped.map(i32::from)
+            (Self::V1_21_8, Direction::Clientbound) => v1_21_8::clientbound(state),
+            (Self::V1_21_8, Direction::Serverbound) => v1_21_8::serverbound(state),
+            (Self::V1_21_5, Direction::Clientbound) => v1_21_5::clientbound(state),
+            (Self::V1_21_5, Direction::Serverbound) => v1_21_5::serverbound(state),
+            (Self::V1_20_6, Direction::Clientbound) => v1_20_6::clientbound(state),
+            (Self::V1_20_6, Direction::Serverbound) => v1_20_6::serverbound(state),
+            (Self::V1_21_1, Direction::Clientbound) => v1_21_1::clientbound(state),
+            (Self::V1_21_1, Direction::Serverbound) => v1_21_1::serverbound(state),
+            (Self::V1_21_3, Direction::Clientbound) => v1_21_3::clientbound(state),
+            (Self::V1_21_3, Direction::Serverbound) => v1_21_3::serverbound(state),
+            (Self::V1_21_4, Direction::Clientbound) => v1_21_4::clientbound(state),
+            (Self::V1_21_4, Direction::Serverbound) => v1_21_4::serverbound(state),
+            (Self::V1_21_6, Direction::Clientbound) => v1_21_6::clientbound(state),
+            (Self::V1_21_6, Direction::Serverbound) => v1_21_6::serverbound(state),
+        }
     }
 
     /// A packet body (VarInt id + payload) Horizon sends, renumbered for this version's server. `None`
@@ -234,7 +518,35 @@ mod tests {
             ServerVersion::from_protocol(773),
             Some(ServerVersion::V1_21_10)
         );
-        assert_eq!(ServerVersion::from_protocol(772), None);
+        assert_eq!(
+            ServerVersion::from_protocol(772),
+            Some(ServerVersion::V1_21_8)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(771),
+            Some(ServerVersion::V1_21_6)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(770),
+            Some(ServerVersion::V1_21_5)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(769),
+            Some(ServerVersion::V1_21_4)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(768),
+            Some(ServerVersion::V1_21_3)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(767),
+            Some(ServerVersion::V1_21_1)
+        );
+        assert_eq!(
+            ServerVersion::from_protocol(766),
+            Some(ServerVersion::V1_20_6)
+        );
+        assert_eq!(ServerVersion::from_protocol(765), None);
         assert!(ServerVersion::V26_1.at_most(ServerVersion::V26_2));
         assert!(!ServerVersion::V26_2.at_most(ServerVersion::V26_1));
     }

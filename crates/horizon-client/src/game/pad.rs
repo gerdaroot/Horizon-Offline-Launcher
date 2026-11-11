@@ -5,6 +5,7 @@
 //! injects a virtual pad on top of the real one.
 use super::event_loop::EventLoopCtl;
 use super::{Game, Screen};
+use horizon_client::actions::Action;
 use horizon_client::held::Source;
 use horizon_client::{
     Result,
@@ -14,7 +15,8 @@ use horizon_client::{
     keymapping::SNEAK,
 };
 use serde_json::{Value, json};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
 pub(super) const HELP: &[&str] = &[
@@ -60,6 +62,9 @@ pub(super) struct Pads {
     last_hardware: PadState,
     /// The pad drove the game last (the mouse and keyboard hand control back).
     pub(super) in_use: bool,
+    /// A key or mouse button was pressed in play since the pad was last touched: the keyboard and
+    /// mouse have it, though only moving the mouse takes the pad out of use.
+    pub(super) keyboard_took_over: bool,
     pub(super) style: GlyphStyle,
     /// The controller driving this player, or else the first one its own reader sees.
     pub(super) device: Option<Device>,
@@ -69,8 +74,17 @@ pub(super) struct Pads {
     pub(super) menu: super::pad_menu::MenuCursor,
     /// The last vibration asked for, for `pad status`.
     last_rumble: Option<(&'static str, gamepad::Pulse)>,
+    /// The drop button, while it is held in play.
+    held_drop: Option<gamepad::HeldDrop>,
+    /// The drop about to happen is the pad's stack form: it has no Control for `drop_whole_stack`.
+    /// On a server the drop waits for the tick.
+    pub(super) drop_stack: bool,
     /// The player's health between polls (a drop is damage taken).
     health: HealthWatch,
+    /// The gameplay guide's facts and the tick they were read in.
+    guide_facts: Option<(u64, horizon_client::gameplay_guide::Facts)>,
+    /// The guide's rows as last drawn.
+    pub(super) guide_shown: Vec<guide::Shown>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,11 +97,15 @@ struct Context {
     enabled: bool,
 }
 
+mod guide;
 #[cfg(feature = "controllers")]
 mod hardware;
 #[cfg(test)]
 mod parity_tests;
 pub(super) use hardware::{PadId, PadRouter};
+
+/// How long the death screen's confirm ignores cancelling (`ConfirmScreen`).
+const DEATH_CONFIRM_WAIT: Duration = Duration::from_secs(1);
 
 /// A controller coming or going, for this player's notice (`pad_connection_notice`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +147,8 @@ mod hardware {
     #[derive(Default)]
     pub(in crate::game) struct PadRouter {}
     impl PadRouter {
+        pub(in crate::game) fn adopt(&mut self, _: &mut Pads) {}
+        pub(in crate::game) fn hand_back(&mut self, _: &mut Pads) {}
         pub(in crate::game) fn events(&mut self) -> Vec<super::PadEvent> {
             Vec::new()
         }
@@ -140,6 +160,8 @@ mod hardware {
         }
         pub(in crate::game) fn lend_output(&mut self, _: &mut Pads, _: PadId) {}
         pub(in crate::game) fn reclaim_output(&mut self, _: &mut Pads) {}
+        pub(in crate::game) fn play_rumbles(&mut self, _: &mut Pads, _: Option<PadId>) {}
+        pub(in crate::game) fn report_status(&self, _: &mut Pads, _: Option<PadId>) {}
         pub(in crate::game) fn connected(&self, _: PadId) -> bool {
             false
         }
@@ -319,8 +341,10 @@ impl Game<'_> {
         if activity && self.pad_focused() {
             self.last_input = Instant::now();
             self.pad.in_use = true;
+            self.pad.keyboard_took_over = false;
         }
         self.pad.state = state;
+        self.pad_drop_frame();
         self.pad_output_frame();
         // Damage from any source, here or on a server; nothing counts on
         // the title screen.
@@ -417,7 +441,19 @@ impl Game<'_> {
     /// Input from the pad counts while the window has focus, or always for
     /// the virtual pad (a script can't focus the window).
     fn pad_focused(&self) -> bool {
-        self.focused || self.pad.virtual_input
+        self.pad_has_window() || self.pad.virtual_input
+    }
+
+    /// The window has focus, or the player lets the pad play without it (Play in Background).
+    pub(super) fn pad_has_window(&self) -> bool {
+        self.focused || self.settings.controller.play_in_background
+    }
+
+    /// Losing focus doesn't pause a game the pad is playing in the background.
+    pub(super) fn pad_keeps_playing_unfocused(&self) -> bool {
+        self.settings.controller.enabled
+            && self.settings.controller.play_in_background
+            && self.pad.in_use
     }
 
     fn pad_button(
@@ -466,8 +502,8 @@ impl Game<'_> {
         };
         match route {
             Route::HotbarStep { next } => {
-                if down && self.screen == Screen::Playing {
-                    self.selected = gamepad::hotbar_step(self.selected, next);
+                if down {
+                    self.hotbar_step(next);
                 }
                 Ok(())
             }
@@ -481,10 +517,10 @@ impl Game<'_> {
                     return Ok(());
                 }
                 let screen_open = self.screen != Screen::Playing || self.title.is_some();
-                let was = self.keys.contains(&KeyCode::ShiftLeft);
+                let was = self.keys.held(Action::Sneak);
                 self.toggles.pad_toggle(SNEAK, screen_open);
                 self.sync_toggle(SNEAK);
-                if !was && self.keys.contains(&KeyCode::ShiftLeft) {
+                if !was && self.keys.held(Action::Sneak) {
                     // The pad's latch: a keyboard handoff leaves it.
                     self.keys.press(KeyCode::ShiftLeft, Source::Pad);
                     self.keys.release(&KeyCode::ShiftLeft, Source::Keyboard);
@@ -510,18 +546,73 @@ impl Game<'_> {
                 }
                 Ok(())
             }
-            Route::Mouse(button) => {
-                if !down || (self.title.is_none() && self.screen == Screen::Playing) {
-                    self.play_mouse(button, down)?;
+            Route::Fullscreen => {
+                if down {
+                    self.toggle_fullscreen();
                 }
                 Ok(())
+            }
+            Route::Held => Ok(()),
+            Route::Mouse(button) => {
+                let playing = self.title.is_none() && self.screen == Screen::Playing;
+                // What the window path tells mods and the click counters. Pick block isn't one
+                // they count.
+                if playing
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
+                    && (down || !self.mouse_mapping_held_elsewhere(button, Source::Pad))
+                {
+                    self.extras_mouse(button, down);
+                }
+                if !down || playing {
+                    self.mouse_mapping(button, down, Source::Pad)?;
+                }
+                Ok(())
+            }
+            Route::Key(KeyCode::KeyQ) => {
+                self.pad.drop_stack = false;
+                self.pad.held_drop = down.then(|| {
+                    let delay = self.settings.controller.repeat_delay;
+                    gamepad::HeldDrop::new(Instant::now(), Duration::from_secs_f32(delay))
+                });
+                self.mapped_key(KeyCode::KeyQ, down, false, KeyCode::KeyQ, Source::Pad)
             }
             Route::Key(key) => self.mapped_key(key, down, false, key, Source::Pad),
         }
     }
 
+    /// Each poll: a held drop button, as a held Q's key repeats reach the mapping.
+    fn pad_drop_frame(&mut self) {
+        if self.pad_in_menu() || self.screen_over_playing() {
+            return;
+        }
+        let interval = Duration::from_secs_f32(self.settings.controller.repeat_interval);
+        let step = self
+            .pad
+            .held_drop
+            .as_mut()
+            .and_then(|held| held.due(Instant::now(), interval));
+        let Some(step) = step else {
+            return;
+        };
+        self.pad.drop_stack = step == gamepad::DropStep::Stack;
+        if let Err(e) = self.mapped_key(KeyCode::KeyQ, true, true, KeyCode::KeyQ, Source::Pad) {
+            log::warn!("Horizon: controller drop: {e}");
+        }
+    }
+
     /// B and Start: what Escape does where the pad is.
     pub(super) fn pad_back(&mut self) -> Result<()> {
+        // The death confirm's buttons wait a second, as its Escape does.
+        if self
+            .ui
+            .death_confirm
+            .is_some_and(|shown| shown.elapsed() < DEATH_CONFIRM_WAIT)
+        {
+            return Ok(());
+        }
+        if self.prompt_open() {
+            return self.pad_prompt_back();
+        }
         // The options open over the title screen too: they come first, as
         // for the keyboard's Escape.
         if self.screen == Screen::Options {
@@ -550,6 +641,26 @@ impl Game<'_> {
             return None;
         }
         gamepad::move_vector(self.pad.state.left, settings.move_deadzone)
+    }
+
+    /// Whether `key` is held, a movement key by the left stick too: as the keys the stick holds
+    /// (`eight_direction_keys`), whatever moves the player. For readers of the keys that aren't
+    /// the movement itself.
+    pub(super) fn movement_key_held(&self, key: KeyCode) -> bool {
+        if self.keys.raw(&key) {
+            return true;
+        }
+        let Some(stick) = self.pad_move() else {
+            return false;
+        };
+        let [forward, backward, left, right] = gamepad::eight_direction_keys(stick);
+        match key {
+            KeyCode::KeyW => forward,
+            KeyCode::KeyS => backward,
+            KeyCode::KeyA => left,
+            KeyCode::KeyD => right,
+            _ => false,
+        }
     }
 
     /// The right stick turns the view, once per frame (`Entity.turn`).
@@ -590,6 +701,10 @@ impl Game<'_> {
     /// notice. Nothing here decides what the controller drives; a player who turned controllers
     /// off isn't told about them.
     fn pad_connection_notice(&mut self, change: Connection) {
+        // The pad that was playing is gone: nothing is driving until another is touched.
+        if matches!(change, Connection::Disconnected { active: true }) {
+            self.pad.in_use = false;
+        }
         if !self.settings.controller.enabled {
             return;
         }
@@ -654,6 +769,7 @@ impl Game<'_> {
                         json!({ "title": title, "body": body })
                     }),
                     "menu": self.pad_menu_status(),
+                    "guide": self.pad_guide_status(),
                     "held": held,
                     "left": s.left,
                     "right": s.right,

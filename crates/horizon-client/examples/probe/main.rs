@@ -24,6 +24,7 @@ mod block_particles_fixture;
 mod block_tint_probe;
 mod block_transform_fixture;
 mod breaking_fixture;
+mod brewing_fixture;
 mod camera_probe;
 mod cauldron_fixture;
 mod chat_screen_fixture;
@@ -33,6 +34,7 @@ mod cloud_fixture;
 mod command_parse_fixture;
 mod container_screen_probe;
 mod container_title_fixture;
+mod conversion_tags_fixture;
 mod creative_mining_probe;
 mod creative_search_fixture;
 mod cushion_placement_probe;
@@ -98,6 +100,7 @@ mod sound_event_fixture;
 mod spawn_rules_fixture;
 mod sprint_probe;
 mod squid_client_probe;
+mod stack_foil_fixture;
 mod storage_menu_fixture;
 mod subtitle_fixture;
 mod tab_list_fixture;
@@ -125,6 +128,7 @@ probes! {
     block_entity_tickers_fixture,
     block_particles_fixture,
     block_transform_fixture,
+    brewing_fixture,
     breaking_fixture,
     block_tint_probe,
     camera_probe,
@@ -139,6 +143,7 @@ probes! {
     command_parse_fixture,
     container_screen_probe,
     container_title_fixture,
+    conversion_tags_fixture,
     creative_search_fixture,
     emitter_particles_probe,
     enchanting_fixture,
@@ -214,6 +219,7 @@ probes! {
     trading_fixture,
     trident_probe,
     translucency_fixture,
+    stack_foil_fixture,
     vehicle_container_fixture,
     weather_fixture,
     world_border_render_fixture,

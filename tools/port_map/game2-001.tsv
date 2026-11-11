@@ -100,7 +100,7 @@ ArmorStand.brokenByAnything	inline	crates/horizon-client/src/game/armor_stands.r
 ArmorStand.playBrokenSound	inline	crates/horizon-client/src/game/armor_stands.rs::Game::attack_armor_stand	break sound on both break paths
 ArmorStand.setYBodyRot	skip:other		client rotation setter from packets; a stand turns only with its yaw field
 ArmorStand.setYHeadRot	skip:other		client rotation setter from packets; a stand turns only with its yaw field
-ArmorStand.kill	inline	crates/horizon-client/src/game/armor_stands.rs::Game::attack_armor_stand	removes the stand; no game event
+ArmorStand.kill	port	crates/horizon-client/src/game/sculk.rs::Game::entity_killed_event	the ENTITY_DIE event, by the attacker or the stand; armor_stands.rs removes the stand
 ArmorStand.setSmall	port	crates/horizon-client/src/entity_nbt.rs::armor_stand_from_nbt	Small tag
 ArmorStand.isSmall	skip:other		accessor; reads the small field
 ArmorStand.setShowArms	port	crates/horizon-client/src/entity_nbt.rs::armor_stand_from_nbt	ShowArms tag
@@ -113,11 +113,11 @@ ArmorStand.setBit	skip:other		packed-flag helper; Horizon keeps separate bools a
 ArmorStand.skipAttackInteraction	missing		minor: adventure-mode protection on stand hits is not checked
 ArmorStand.onSyncedDataUpdated	skip:other		client refresh when flags sync; bounds are computed on demand
 ArmorStand.getDimensionsMarker	inline	crates/horizon-client/src/game/armor_stands.rs::Game::armor_stand_hit	marker stands are skipped, so they have no box
-ArmorStand.getLightProbePosition	skip:ui		render light probe for markers; drawing only
+ArmorStand.getLightProbePosition	port	crates/horizon-client/src/entities.rs::ArmorStand::light_probe	a marker walks the cells of its non-marker box (BlockPos.betweenClosed, x fastest) for a brightness-15 cell, else the brightest; any other stand is lit from its eye (eyeHeight 1.7775, 0.9875 small)
 ArmorStand.setArmorStandPose	port	crates/horizon-client/src/entity_nbt.rs::armor_stand_from_nbt	Pose tag read into the six pose parts
 ArmorStand.getArmorStandPose	port	crates/horizon-client/src/entity_nbt.rs::armor_stand_to_nbt	Pose tag written from the six pose parts
 BlockAttachedEntity.skipAttackInteraction	inline	crates/horizon-client/src/game/cushions.rs::Game::attack_cushion	the mayInteract gate and the break; frames and paintings keep their own copies
-BlockAttachedEntity.kill	inline	crates/horizon-client/src/game/cushions.rs::Game::break_cushion	removal and the break; no game event
+BlockAttachedEntity.kill	port	crates/horizon-client/src/game/sculk.rs::Game::entity_killed_event	the ENTITY_DIE event, by the attacker or the entity; break_cushion, break_painting and the frame paths remove it
 BlockAttachedEntity.ignoreExplosion	port	crates/horizon-client/src/game/explosion.rs::blast_spares_decorations	a source in water spares paintings, item frames, cushions and armour stands, and so does a blast that keeps blocks without mob griefing; read when the blast picks its entities
 BlockAttachedEntity.move	missing		minor: a piston push does not break a cushion, painting or frame here
 BlockAttachedEntity.push	missing		minor: a push from a blast or piston does not break a cushion, painting or frame

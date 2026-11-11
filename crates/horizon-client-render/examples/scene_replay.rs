@@ -224,6 +224,8 @@ fn replay(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         settings.translucent_batching,
         false,
         false,
+        false,
+        false,
     ))?;
     drop(pixels);
     render.pixels.pack();
@@ -648,6 +650,7 @@ fn remesh(
                         nether_shading: false,
                         shader_pack_lighting: false,
                         separate_ao: false,
+                        shader_pack: false,
                         assets,
                         render,
                         tables: &tables,

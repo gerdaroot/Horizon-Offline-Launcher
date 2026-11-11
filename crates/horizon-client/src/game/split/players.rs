@@ -303,9 +303,14 @@ impl Split<'_> {
             horizon_client::settings::Settings::load(&options)
         } else {
             std::fs::create_dir_all(&profile)?;
-            self.host.settings.save(&options);
-            self.host.settings.clone()
+            let mut new = self.host.settings.clone();
+            // The Controller setting is P1's, as on the profile page (`join`).
+            new.controller.enabled |= self.guests[i].pad.is_some();
+            new.save(&options);
+            new
         };
+        // A profile an earlier join saved with P1's off, or the player's pad would be dead.
+        settings.controller.enabled |= self.guests[i].pad.is_some();
         // P1's own world through memory (`Ok`), else P1's server over the network (`Err`).
         let via = match &self.host.integrated {
             Some(server) => Ok(server
@@ -335,6 +340,15 @@ impl Split<'_> {
                 server.leave_split(&name);
             }
             return Err(e);
+        }
+        // The seat plays P1's world, so mods keep its data with P1's.
+        let save = self
+            .host
+            .remote
+            .as_ref()
+            .and_then(|r| r.save_folder.clone());
+        if let Some(r) = self.guests[i].game.remote.as_mut() {
+            r.save_folder = save;
         }
         self.guests[i].name = Some(name);
         self.guests[i].entered = false;
@@ -454,12 +468,14 @@ impl Split<'_> {
         });
         let mut settings = settings;
         settings.extras.agent_control &= options.control.is_some();
-        let gui = UiResources::load(&options.resources, &options.resources)?;
+        // `options.resources` is P1's overlay when a pack is on: never the vanilla root, as a
+        // reload would rebuild that overlay out of itself.
+        let vanilla_root = host.vanilla_root();
+        let gui = UiResources::load(&options.resources, &vanilla_root)?;
         // P1's output, heard from this player's camera too (`Audio::share`).
         let audio = host.audio.share(seat as u8);
         let window = host.window.clone().ok_or("no window")?;
         let pack = host.pack.clone();
-        let resources = host.options.resources.clone();
         let mut guest = boxed(|| {
             start_game(
                 res,
@@ -468,10 +484,11 @@ impl Split<'_> {
                 options,
                 None,
                 audio,
-                resources,
+                vanilla_root,
                 Instant::now(),
                 None,
                 Some(settings),
+                None,
                 None,
             )
         })?;
@@ -486,7 +503,7 @@ impl Split<'_> {
             host.settings.horizon.translucent_batching,
             host.settings.horizon.wide_frame(),
             // The pack its own game loads, from its profile.
-            crate::game::shader_packs::picked_pack_draws_flat(&guest.settings),
+            crate::game::shader_packs::picked_pack_shape(&guest.settings),
             (
                 guest.settings.file.int("textureFiltering"),
                 guest.settings.file.int("maxAnisotropyBit"),
