@@ -29,7 +29,7 @@
 
 - **No account is required.** Play starts the game offline under your own name, and everything works without one: mods, resource packs, shaders, instances, servers, friends. These builds have no Microsoft sign-in at all.
 - **Your own skin and cape.** Pick a skin PNG (classic or slim arms) and a cape PNG in Settings → Account: you wear them in single player and on servers that send no skin of their own.
-- **You can pick your own jar.** "Choose jar…" takes a `26.3.jar` from anywhere: TLauncher, your Downloads folder, a USB stick. Without a choice, the launcher finds it by itself in the folders of the official launcher, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher and Dawn.
+- **You can pick your own jar.** "Choose jar…" takes a `26.3.jar` from anywhere: TLauncher, your Downloads folder, a USB stick. Without a choice, the launcher finds it by itself in the folders of the official launcher, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher, Dawn and SKLauncher.
 - **Updates come from this repository only.** The launcher and the game update themselves from its releases, signed with its own key, so an upstream update can't bring the account requirement back.
 - **Horizon's latest fixes.** The game is built from Horizon's current Nightly with this fork's changes on top.
 - **A real Windows installer**, or one command on any system, with desktop and Start menu shortcuts.
@@ -167,7 +167,7 @@ The game and nearly all of the code are [Horizon](https://github.com/horizon-rus
 
 - **Аккаунт не нужен.** «Играть» запускает игру офлайн под вашим ником, и без аккаунта работает всё: моды, ресурс-паки, шейдеры, сборки, серверы, друзья. Входа через Microsoft в этих сборках нет вообще.
 - **Свой скин и плащ.** PNG скина (обычные или тонкие руки) и PNG плаща выбираются в «Настройки → Аккаунт»: они видны на вас в одиночной игре и на серверах, которые не дают свой скин.
-- **Можно выбрать свой jar.** Кнопка «Выбрать jar…» берёт файл `26.3.jar` откуда угодно: из TLauncher, папки «Загрузки» или с флешки. Без выбора лаунчер сам ищет его в папках официального лаунчера, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher и Dawn.
+- **Можно выбрать свой jar.** Кнопка «Выбрать jar…» берёт файл `26.3.jar` откуда угодно: из TLauncher, папки «Загрузки» или с флешки. Без выбора лаунчер сам ищет его в папках официального лаунчера, TLauncher, Prism, MultiMC, Modrinth, AstralRinth, ATLauncher, GDLauncher, Dawn и SKLauncher.
 - **Обновления только из этого репозитория.** Лаунчер и игра обновляются сами из его релизов, подписанных своим ключом, поэтому официальное обновление не вернёт обязательный вход.
 - **Свежие исправления Horizon.** Игра собирается из текущего Nightly Horizon с изменениями этого форка поверх.
 - **Настоящий установщик для Windows** или одна команда на любой системе. Ярлыки на рабочем столе и в меню «Пуск» создаются сами.

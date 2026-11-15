@@ -134,6 +134,7 @@ pub fn known_folders(os: Os, f: &Folders) -> Vec<(&'static str, PathBuf)> {
                 flatpak("com.atlauncher.ATLauncher", "data/atlauncher"),
             ),
             ("Dawn Client", f.home.join(".dawn")),
+            ("SKLauncher", f.home.join(".sklauncher")),
         ],
         Os::MacOs => vec![
             (OFFICIAL, f.data.join("minecraft")),
@@ -149,6 +150,8 @@ pub fn known_folders(os: Os, f: &Folders) -> Vec<(&'static str, PathBuf)> {
             ("Modrinth App", f.data.join("ModrinthApp")),
             ("ATLauncher", f.data.join("ATLauncher")),
             ("Dawn Client", f.data.join(".dawn")),
+            // SKLauncher: the official launcher's layout in its own folder (#23).
+            ("SKLauncher", f.data.join(".sklauncher")),
         ],
     };
     // Names every system shares: the Modrinth App before its rename, AstralRinth (the Modrinth
@@ -273,6 +276,7 @@ fn launcher_of(path: &Path) -> Option<&'static str> {
             "atlauncher" | "ATLauncher" => Some("ATLauncher"),
             "gdlauncher_carbon" | "gdlauncher_next" => Some("GDLauncher"),
             ".dawn" | "dawn" => Some("Dawn Client"),
+            ".sklauncher" => Some("SKLauncher"),
             _ => None,
         })
 }
