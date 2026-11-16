@@ -88,9 +88,9 @@ jobs:
         with:
           workspaces: launcher
           key: ${{ matrix.name }}
-      - name: Linux libraries GPUI links to
+      - name: Linux libraries GPUI links to, and patchelf for the AppImage
         if: runner.os == 'Linux'
-        run: bash "$GITHUB_WORKSPACE/tools/ci/apt_install.sh" libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+        run: bash "$GITHUB_WORKSPACE/tools/ci/apt_install.sh" libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf
       - name: Metal shaders at run time without the Metal toolchain
         if: runner.os == 'macOS'
         run: |
@@ -132,6 +132,20 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
+      # One file players download, make executable and run (packaging/linux/appimage.sh). The name
+      # is what an AppImage launcher's self-update looks for (backend::LAUNCHER_APPIMAGE_ASSET), so
+      # the release must carry it under exactly that. The version is the tag's, or Cargo.toml's —
+      # the same fallback backend::VERSION uses, and what the script's --version check expects.
+      - name: Linux AppImage
+        if: matrix.name == 'linux'
+        run: |
+          version=${HORIZON_LAUNCHER_VERSION:-$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "horizon-launcher") | .version')}
+          ../packaging/linux/appimage.sh target/release/horizon-launcher "$version" ../dist
+      - uses: actions/upload-artifact@v4
+        if: matrix.name == 'linux'
+        with:
+          name: horizon-launcher-linux-x86_64.AppImage
+          path: dist/horizon-launcher-linux-x86_64.AppImage
       - uses: actions/upload-artifact@v4
         if: matrix.name == 'windows'
         with:
