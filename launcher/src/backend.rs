@@ -2107,8 +2107,8 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let mut accounts = account::Accounts::load();
-    // The strict gate, never `launch_for_game`: the developer option that lets offline names
-    // play without an owner must not download the game for them.
+    // The strict gate, never `launch_for_game`: a download must not start past the gate
+    // (`GATE_OPEN`) with no owner.
     let pass = account::launch(
         &account::Endpoints::live(),
         account::client_id().as_deref(),
@@ -3187,7 +3187,7 @@ pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, St
         return Err(error);
     }
     let session = match who {
-        None => account::session_for_game(&game_home(), false).map_err(|e| e.to_string()),
+        None => account::session_for_game(&game_home()).map_err(|e| e.to_string()),
         Some(who) => account::session_for_game_as(&game_home(), who),
     }
     .map_err(|refused| format!("{refused} {}", crate::i18n::tr(SIGN_IN_HINT)))?;
@@ -4517,15 +4517,7 @@ pub struct Settings {
     /// An older file's switch for the release profile, read when `native_profile` is unset.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_release: bool,
-    /// Developer options (hidden: seven clicks on the sidebar's launcher version reveal them):
-    /// offline names play without an account that owns the game, in the window only
-    /// (`account::Accounts::play_as_with`, `account::launch_for_game`). Never a download: the game still
-    /// comes from the player's own install. Off by default, and absent from the file while off.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub dev_offline: bool,
-}
-
-impl Settings {
+}impl Settings {
     pub fn load() -> Self {
         Self::parse(&fs::read_to_string(data_dir().join("settings.json")).unwrap_or_default())
     }
@@ -4788,8 +4780,8 @@ mod tests {
     }
 
     /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
-    /// account the services said owns the game: never without one, and never past the gate by
-    /// the developer option (`Settings::dev_offline`), whose pass has no owner.
+    /// account the services said owns the game: never without one, and never past the gate
+    /// (`account::GATE_OPEN`), whose pass has no owner.
     #[test]
     fn mojang_downloads_only_for_an_owner() {
         let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));

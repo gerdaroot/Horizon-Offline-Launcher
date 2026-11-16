@@ -710,41 +710,38 @@ fn offline_names_play_without_an_owner_in_this_fork() {
     // `launch` itself still tells there is no owner (downloads need one)...
     let (_, ep) = mock(|m| m.owns_game = false);
     assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_err());
-    // ...but the game starts offline, with or without the developer option.
-    for option in [false, true] {
-        let pass =
-            launch_for_game(&ep, Some("test-client"), &store, &mut accounts, option).unwrap();
-        assert!(pass.session.is_none() && pass.owner.is_none());
-    }
+    // ...but the game starts offline all the same.
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+    assert!(pass.session.is_none() && pass.owner.is_none());
 }
 
 #[test]
-fn the_developer_option_plays_offline_names_without_an_owner() {
+fn offline_names_play_without_an_owner() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
     accounts
-        .play_as_with(&store, Player::Offline("Builder_1".into()), true)
+        .play_as(&store, Player::Offline("Builder_1".into()))
         .unwrap();
     assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
     assert_eq!(accounts.name_arg(), Some("Builder_1"));
     // The game starts offline: no request, no session, and no owner to download the game for.
     let (m, ep) = mock(|_| {});
-    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, true).unwrap();
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
     assert!(pass.session.is_none() && pass.owner.is_none() && pass.offline.is_none());
     assert!(m.lock().unwrap().log.is_empty());
     // Beside an account the services say doesn't own the game: the same, still no owner.
     let (_, ep) = mock(|m| m.owns_game = false);
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
     accounts
-        .play_as_with(&store, Player::Offline("Builder_1".into()), true)
+        .play_as(&store, Player::Offline("Builder_1".into()))
         .unwrap();
-    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, true).unwrap();
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
     assert!(pass.session.is_none() && pass.owner.is_none());
     assert!(!accounts.has_owner(&store));
-    // A real owner is still found and brings what it brings without the option.
+    // A real owner is still found and brings what it brings.
     let (_, ep) = mock(|_| {});
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
-    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, true).unwrap();
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
     assert_eq!(pass.owner.unwrap().0.name, "Notch");
 }
 
