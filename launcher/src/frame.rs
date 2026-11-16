@@ -580,11 +580,7 @@ impl Launcher {
                 .child(trf(
                     "Offline launcher {version}",
                     &[("version", backend::VERSION)],
-                ))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.version_clicked();
-                    cx.notify();
-                })),
+                )),
         );
 
         crate::glass::plate(radius::PANEL)
