@@ -16,6 +16,11 @@ fn main() {
     println!("cargo:rerun-if-changed={}", ico.display());
     // The game's main thread gets 8 MB of stack on Windows as on macOS and Linux (Windows gives 1
     // MB): splitscreen builds a joining player's `Game`, ~67 KB, deep in the event loop.
+    // iOS: the main thread has 1 MB (`Game` and the event loop live on it, and UIKit insists on the
+    // main thread for the event loop), so ask the linker for 8 MB (LC_MAIN's stack size).
+    if target_os == "ios" {
+        println!("cargo:rustc-link-arg-bin=horizon-client=-Wl,-stack_size,0x800000");
+    }
     if target_os == "windows" {
         println!("cargo:rerun-if-env-changed=WINDRES");
         println!("cargo:rerun-if-env-changed=AR");

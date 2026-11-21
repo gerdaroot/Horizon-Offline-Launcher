@@ -7,13 +7,27 @@ use crate::ui_theme::{self, Face, Ui, color};
 /// The launcher's download page.
 pub const DOWNLOAD_URL: &str = "https://playhorizon.dev";
 
+#[cfg(not(target_os = "ios"))]
 const TITLE: &str = "Start Horizon from the launcher";
+#[cfg(not(target_os = "ios"))]
 const PARAGRAPHS: [&str; 3] = [
     "This is the game the Horizon launcher installs and starts. On its own it has none of \
      Minecraft's files, so it can't start.",
     "Horizon needs your own copy of Minecraft: Java Edition. The launcher signs you in and \
      prepares the game files from it.",
     "Download the launcher at playhorizon.dev, then press Play there.",
+];
+// iOS: no launcher and no Java to prepare the files with; they are prepared on a computer and
+// copied into the app's folder, which the Files app shows (docs/ios.md).
+#[cfg(target_os = "ios")]
+const TITLE: &str = "Horizon needs your game files";
+#[cfg(target_os = "ios")]
+const PARAGRAPHS: [&str; 3] = [
+    "Horizon has none of Minecraft's files, so it can't start yet. It needs your own copy of \
+     Minecraft: Java Edition, prepared on a computer.",
+    "On a computer, prepare the game with the Horizon launcher, then copy the folder \
+     horizon-client/26.3 into Files > On My iPhone > Horizon > Horizon.",
+    "Then open Horizon again. The path below is where it looked.",
 ];
 const COLUMN: f32 = 560.0;
 const BUTTON_GAP: f32 = 12.0;
@@ -55,10 +69,16 @@ impl NoResources {
         let buttons_y = y + TITLE_LINE + 16.0 + text_h + 28.0;
         let mut buttons = Vec::new();
         let mut bx = x;
-        for (label, action) in [
-            ("Download the launcher", Action::Download),
-            ("Quit", Action::Quit),
-        ] {
+        // iOS can't open a browser by starting a program, and nobody there downloads the launcher.
+        let choices: &[(&'static str, Action)] = if cfg!(target_os = "ios") {
+            &[("Quit", Action::Quit)]
+        } else {
+            &[
+                ("Download the launcher", Action::Download),
+                ("Quit", Action::Quit),
+            ]
+        };
+        for &(label, action) in choices {
             let w = (ui.measure(Face::Medium, BUTTON_TEXT, label) + 40.0).round();
             buttons.push(Button {
                 label,

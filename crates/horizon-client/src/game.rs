@@ -724,10 +724,17 @@ impl Options {
         let mut o = Self {
             resources: if sibling.join("horizon-resources.json").exists() {
                 sibling
+            } else if cfg!(target_os = "ios") {
+                // No `.local` (the Files app hides it): the player copies the prepared files in.
+                horizon_client::ios::default_resources()
             } else {
                 std::path::Path::new(".local/horizon-client").join(horizon_core::VANILLA_VERSION)
             },
-            distance: 12,
+            distance: if cfg!(target_os = "ios") {
+                horizon_client::ios::DEFAULT_RENDER_DISTANCE
+            } else {
+                12
+            },
             distance_override: None,
             seed: 0,
             creative: false,

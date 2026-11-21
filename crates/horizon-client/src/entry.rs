@@ -12,6 +12,11 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     if crate::mod_api::MODS.set(mods).is_err() {
         log::warn!("Trait mods already installed; ignoring the second list");
     }
+    // iOS: no command line and no writable working directory. Before anything reads either.
+    #[cfg(target_os = "ios")]
+    if let Err(e) = crate::ios::enter_sandbox() {
+        eprintln!("Horizon: the game folder is unusable: {e}");
+    }
     horizon_threads::configure_allocator();
     horizon_client::telemetry::mark_start();
     horizon_client::spans::startup::init(std::time::Instant::now());
