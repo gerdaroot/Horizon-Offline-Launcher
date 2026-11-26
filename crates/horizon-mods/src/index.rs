@@ -616,8 +616,8 @@ pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
             let facts = native::Bundle::read(path)?.manifest.facts();
             // A `.hmod` with content too: checked as the game reads it.
             if Package::has_manifest(path) {
-                let m = Package::read(path)?.manifest;
-                crate::Content::read(path, &m)?;
+                let package = Package::read(path)?;
+                crate::Content::read(path, &package.manifest)?;
             }
             Ok(facts)
         }
@@ -628,7 +628,11 @@ pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
                     native::MANIFEST
                 ));
             }
-            let Package { manifest: m, wasm } = Package::read(path)?;
+            let package = Package::read(path)?;
+            if let Some(problem) = package.runtime_problem() {
+                return Err(problem);
+            }
+            let Package { manifest: m, wasm } = package;
             crate::Content::read(path, &m)?;
             let api_level = match wasm {
                 Some(wasm) => {

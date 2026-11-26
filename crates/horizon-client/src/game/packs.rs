@@ -497,7 +497,7 @@ pub(super) fn stage_pack(
     progress: &super::Progress,
 ) -> horizon_client::Result<StagedPack> {
     let root = startup_root(vanilla_root, selected, server)?;
-    let root = super::mods::content_root(&root, mods_enabled, dev_mods);
+    let root = super::mods::content_root(&root, mods_enabled, dev_mods, horizon_mods::Side::Client);
     progress.set(1);
     // The world's models and sprites and the GUI atlas read the same root and nothing of
     // each other: about a second each, side by side.

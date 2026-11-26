@@ -15,7 +15,9 @@ pub type Mod = (String, String, Option<String>);
 /// Whether an installed file (`installed::Entry::file`) is a native mod.
 pub fn is_native_file(file: &str) -> bool {
     file.strip_prefix(native_mods::INSTALLED)
-        .is_some_and(|rest| rest.starts_with('/') && rest.ends_with(".hnmod"))
+        .is_some_and(|rest| {
+            rest.starts_with('/') && horizon_mods::index::native::is_file(Path::new(rest))
+        })
 }
 
 /// Where an instance's native mods stand.
@@ -131,7 +133,16 @@ pub fn enabled(home: &Path) -> Vec<Mod> {
                     out.push((b.manifest.id, b.manifest.version, Some(digest)));
                 }
             }
-            Err(_) => out.push((stem(&path), String::new(), None)),
+            Err(_) => match horizon_mods::Package::read(&path) {
+                Ok(package)
+                    if package.runtime_problem().is_some()
+                        && java::is_enabled(home, &package.manifest.id) =>
+                {
+                    out.push((package.manifest.id, package.manifest.version, None));
+                }
+                Ok(_) => {}
+                Err(_) => out.push((stem(&path), String::new(), None)),
+            },
         }
     }
     out
@@ -177,6 +188,10 @@ pub fn untracked(home: &Path) -> Vec<Installed> {
             }
             let (id, version) = horizon_mods::index::native::Bundle::read(&path)
                 .map(|b| (b.manifest.id, b.manifest.version))
+                .or_else(|_| {
+                    horizon_mods::Package::read(&path)
+                        .map(|package| (package.manifest.id, package.manifest.version))
+                })
                 .unwrap_or_else(|_| (stem(&path), String::new()));
             let origin = (path.file_stem()?.to_str()? == id)
                 .then(|| crate::github_mods::origin(home, &id))
@@ -244,7 +259,7 @@ fn hnmods(home: &Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(home.join(native_mods::INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod"));
+    paths.retain(|p| p.is_file() && horizon_mods::index::native::is_file(p));
     paths.sort();
     paths
 }

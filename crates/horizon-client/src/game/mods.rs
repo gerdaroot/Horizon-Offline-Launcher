@@ -95,9 +95,10 @@ pub(super) fn content_root(
     root: &std::path::Path,
     enabled: &std::collections::BTreeSet<String>,
     dev: &[std::path::PathBuf],
+    side: horizon_mods::Side,
 ) -> std::path::PathBuf {
     use horizon_client::mod_content::{self, ContentMod};
-    use horizon_mods::{Capability, Content, Package};
+    use horizon_mods::{Capability, Content, Package, dependencies};
     let here = std::env::current_dir().unwrap_or_default();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
@@ -106,17 +107,40 @@ pub(super) fn content_root(
     let mut mods: Vec<ContentMod> = Vec::new();
     // The first load's list stays (`set_local`): a reload does not hash the files again.
     let announce = !horizon_protocol::mod_list::is_set();
-    let mut announced = Vec::new();
-    for path in &paths {
-        let Ok(package) = Package::read(path) else {
-            continue;
-        };
-        let m = &package.manifest;
-        let on = enabled.contains(&m.id) || dev.contains(path);
-        if !on
-            || !m.capabilities.contains(&Capability::Registries)
-            || mods.iter().any(|c| c.id == m.id)
-        {
+    let candidates: Vec<_> = paths
+        .iter()
+        .filter_map(|path| {
+            let package = Package::read(path).ok()?;
+            let m = &package.manifest;
+            (package.runtime_problem().is_none()
+                && m.capabilities.contains(&Capability::Registries)
+                && (enabled.contains(&m.id) || dev.contains(path)))
+            .then_some((path, package.manifest))
+        })
+        .collect();
+    let has_dependencies = candidates.iter().any(|(_, m)| {
+        m.content_for(side)
+            && m.dependencies
+                .values()
+                .any(|dependency| dependency.applies_to(side))
+    });
+    let order = if has_dependencies {
+        let manifests: Vec<_> = candidates.iter().map(|(_, manifest)| manifest).collect();
+        dependencies::resolve_content(&manifests, side).unwrap_or_else(|error| {
+            log::warn!("Horizon: content mods not loaded: {error}");
+            Vec::new()
+        })
+    } else {
+        candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, m))| m.content_for(side).then_some(index))
+            .collect()
+    };
+    let mut accepted = Vec::new();
+    for &index in &order {
+        let (path, m) = &candidates[index];
+        if mods.iter().any(|content| content.id == m.id) {
             continue;
         }
         // The items this mod's native code declares may be a file item's crafting remainder.
@@ -149,12 +173,16 @@ pub(super) fn content_root(
             content,
         };
         match mod_content::accept_mod(&mut mods, candidate, known) {
-            Ok(_) if announce => announced.push(announced_entry(m, path)),
-            Ok(_) => {}
+            Ok(_) => accepted.push((m, path)),
             Err(e) => log::warn!("Horizon: mod {} content not loaded: {e}", m.id),
         }
     }
     let (blocks, items) = native_declared();
+    let accept_declared = |mods: &mut Vec<ContentMod>, known| {
+        for e in mod_content::accept_declared(mods, blocks, items, known) {
+            log::warn!("Horizon: {e}");
+        }
+    };
     if !blocks.is_empty() || !items.is_empty() {
         if known.is_none() {
             match mod_content::known_components(root) {
@@ -163,9 +191,7 @@ pub(super) fn content_root(
             }
         }
         if let Some(known) = &known {
-            for e in mod_content::accept_declared(&mut mods, blocks, items, known) {
-                log::warn!("Horizon: {e}");
-            }
+            accept_declared(&mut mods, known);
             // A file item's remainder named a code-declared item that was refused: that mod
             // alone is left out, not every content mod through the overlay's check.
             for e in mod_content::drop_dangling_remainders(&mut mods) {
@@ -173,9 +199,28 @@ pub(super) fn content_root(
             }
         }
     }
+    accepted.retain(|(manifest, path)| {
+        mods.iter()
+            .any(|content| content.id == manifest.id && content.content.source() == path.as_path())
+    });
+    if has_dependencies && accepted.len() != order.len() {
+        let loaded: Vec<_> = accepted.iter().map(|(manifest, _)| *manifest).collect();
+        if let Err(error) = dependencies::resolve_content(&loaded, side) {
+            log::warn!("Horizon: content mods not loaded: {error}");
+            mods.clear();
+            accepted.clear();
+            if let Some(known) = &known {
+                accept_declared(&mut mods, known);
+            }
+        }
+    }
     match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
         Ok(out) => {
             if announce {
+                let announced = accepted
+                    .iter()
+                    .map(|(manifest, path)| announced_entry(manifest, path))
+                    .collect();
                 horizon_protocol::mod_list::set_local(announced);
             }
             if out != root {
@@ -369,21 +414,41 @@ fn not_built(dir: &std::path::Path, built: &str, rows: &[Installed]) -> Vec<Inst
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|d| d.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod"));
+    paths.retain(|p| p.is_file() && horizon_mods::index::native::is_file(p));
     paths.sort();
     let mut out: Vec<Installed> = Vec::new();
     for path in paths {
-        let Ok(bundle) = horizon_mods::index::native::Bundle::read(&path) else {
-            continue;
-        };
-        let m = bundle.manifest;
-        let listed = rows.iter().chain(&out).any(|row| row.id == m.id);
-        if !listed && !in_build(&m.id) {
+        let (id, title, description, problem) =
+            match horizon_mods::index::native::Bundle::read(&path) {
+                Ok(bundle) => {
+                    let manifest = bundle.manifest;
+                    (
+                        manifest.id.clone(),
+                        format!("{} {}", manifest.id, manifest.version),
+                        String::new(),
+                        mod_list::NOT_BUILT.to_owned(),
+                    )
+                }
+                Err(error) => {
+                    let Ok(package) = horizon_mods::Package::read(&path) else {
+                        continue;
+                    };
+                    let manifest = package.manifest;
+                    (
+                        manifest.id,
+                        format!("{} {}", manifest.name, manifest.version),
+                        manifest.description,
+                        error,
+                    )
+                }
+            };
+        let listed = rows.iter().chain(&out).any(|row| row.id == id);
+        if !listed && !in_build(&id) {
             out.push(Installed {
-                title: format!("{} {}", m.id, m.version),
-                id: m.id,
-                description: String::new(),
-                problem: Some(mod_list::NOT_BUILT.to_owned()),
+                title,
+                id,
+                description,
+                problem: Some(problem),
                 dev: false,
                 native: None,
             });
@@ -403,11 +468,19 @@ impl Game<'_> {
     /// mods don't run any more: their rows say so, and the player hears it once in the chat
     /// (`tell_native_now`).
     pub(super) fn start_mods(&mut self) {
+        use horizon_mods::{Capability, Side, dependencies};
         let dir = Self::game_dir().join(mod_list::DIR);
         let mut paths = horizon_mods::find(&dir);
         paths.retain(|p| !self.mods.dev.contains(p));
         paths.extend(self.mods.dev.iter().cloned());
         let (mut content_ids, mut live_ids) = Default::default();
+        let side = if self.options.dedicated.is_some() {
+            Side::Server
+        } else {
+            Side::Client
+        };
+        let mut selected = Vec::new();
+        let mut restart_ids = std::collections::BTreeSet::new();
         self.settings.mods.installed = paths
             .iter()
             .map(|path| {
@@ -426,18 +499,54 @@ impl Game<'_> {
                     }
                 };
                 let m = &package.manifest;
-                let problem = package.wasm.is_some().then(|| STOPPED.to_owned());
-                live_switch_of(path, &package, &mut content_ids, &mut live_ids);
+                let problem = package.runtime_problem();
+                let dev = self.mods.dev.contains(path);
+                if problem.is_none()
+                    && m.capabilities.contains(&Capability::Registries)
+                    && m.content_for(side)
+                {
+                    live_switch_of(path, &package, &mut content_ids, &mut live_ids);
+                    let on = dev || self.settings.mods.enabled.contains(&m.id);
+                    for (id, dependency) in &m.dependencies {
+                        if dependency.applies_to(side) {
+                            restart_ids.insert(m.id.clone());
+                            if on {
+                                restart_ids.insert(id.clone());
+                            }
+                        }
+                    }
+                    if on {
+                        selected.push(m.clone());
+                    }
+                }
+                let problem =
+                    problem.or_else(|| package.wasm.is_some().then(|| STOPPED.to_owned()));
                 Installed {
                     id: m.id.clone(),
                     title: format!("{} {}", m.name, m.version),
                     description: m.description.clone(),
                     problem,
-                    dev: self.mods.dev.contains(path),
+                    dev,
                     native: None,
                 }
             })
             .collect();
+        live_ids.retain(|id| !restart_ids.contains(id));
+        let has_dependencies = selected.iter().any(|m| {
+            m.dependencies
+                .values()
+                .any(|dependency| dependency.applies_to(side))
+        });
+        if has_dependencies
+            && let Err(error) =
+                dependencies::resolve_content(&selected.iter().collect::<Vec<_>>(), side)
+        {
+            for row in &mut self.settings.mods.installed {
+                if row.problem.is_none() && selected.iter().any(|m| m.id == row.id) {
+                    row.problem = Some(error.clone());
+                }
+            }
+        }
         (self.mods.content_ids, self.mods.live_ids) = (content_ids, live_ids);
         self.ui.options.mods_live = self.mods_live_now();
         if self.mods.applied.is_none() {

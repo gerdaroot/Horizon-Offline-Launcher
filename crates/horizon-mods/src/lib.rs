@@ -3,10 +3,11 @@
 //! native (docs/native-mods.md).
 pub mod api_level;
 pub mod content;
+pub mod dependencies;
 #[cfg(feature = "index")]
 pub mod index;
 pub mod manifest;
 pub mod modpack;
 
 pub use content::Content;
-pub use manifest::{Capability, Manifest, Package, Side, find};
+pub use manifest::{Capability, Manifest, Package, PackageKind, Side, find};

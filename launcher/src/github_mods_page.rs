@@ -298,16 +298,12 @@ impl Launcher {
     /// The warning, the exact source, and the only way forward: saying they trust it.
     fn github_review(&self, found: &Resolved, only: Option<String>, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let what = match (&found.asset, &found.content_only) {
-            (Some(asset), _) => trf(
+        let what = match found.asset.as_ref().or(found.hmod.as_ref()) {
+            Some(asset) => trf(
                 "The release file {file} ({source}).",
                 &[("file", &asset.name), ("source", &found.label())],
             ),
-            (None, Some(file)) => trf(
-                "The source of {source}. Its release ships {file}, a content mod: installing those from GitHub is not supported yet.",
-                &[("source", &found.label()), ("file", file)],
-            ),
-            (None, None) => trf(
+            None => trf(
                 "The source at commit {commit}.",
                 &[("commit", &found.commit)],
             ),
@@ -323,6 +319,12 @@ impl Launcher {
             .text_color(t.ink)
             .child(caps(tr("Not reviewed by the Horizon registry")).text_color(t.danger))
             .child(what)
+            .when(found.asset.is_none() && found.hmod.is_some(), |row| {
+                row.child(trf(
+                    "The source at commit {commit}.",
+                    &[("commit", &found.commit)],
+                ))
+            })
             .child(
                 tr("Native mods run with full access to this computer. Read the source before you install it."),
             )

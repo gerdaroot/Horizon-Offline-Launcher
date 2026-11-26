@@ -21140,6 +21140,11 @@ pub fn run_with() -> Result<()> {
         &options.resources,
         &early_settings.mods.enabled,
         &options.dev_mods,
+        if options.dedicated.is_some() {
+            horizon_mods::Side::Server
+        } else {
+            horizon_mods::Side::Client
+        },
     );
     let loaded = load_resources(
         options.resources.clone(),

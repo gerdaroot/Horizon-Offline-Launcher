@@ -209,6 +209,9 @@ fn build_in(root: &Path) -> Result<PathBuf, String> {
     let manifest_text = std::fs::read_to_string(root.join(MANIFEST))
         .map_err(|e| format!("{MANIFEST}: {e} (run this in a mod's folder)"))?;
     let manifest = Manifest::parse(&manifest_text)?;
+    if manifest.native.is_some() || manifest.wasm.is_some() {
+        return Err("the content builder cannot package a native or WebAssembly mod".into());
+    }
     if root.join("Cargo.toml").exists() {
         return Err("a Cargo.toml: code mods are native now (docs/native-mods.md)".into());
     }
@@ -333,6 +336,20 @@ mod tests {
             .is_err()
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_content_builder_refuses_a_manifest_declaring_code() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-mod-code-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(MANIFEST),
+            format!("id = 'example'\nname = 'Example'\nversion = '1.0.0'\napi = '0.2'\ncapabilities = ['registries']\n[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n", "a".repeat(40), "b".repeat(40)),
+        ).unwrap();
+        let result = build_in(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(result.unwrap_err().contains("native"));
     }
 
     #[test]
