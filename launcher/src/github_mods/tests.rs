@@ -99,11 +99,11 @@ fn a_repository_resolves_to_its_latest_releases_hnmod_and_commit() {
     let file = found.asset.unwrap();
     assert_eq!(file.name, "zoom-1.hnmod");
     assert_eq!(file.sha256, Some("ab".repeat(32)));
-    assert_eq!(found.content_only, None);
+    assert_eq!(found.hmod, None);
 }
 
 #[test]
-fn a_release_with_no_hnmod_falls_back_to_its_commit_and_remembers_a_content_mod() {
+fn a_release_with_no_hnmod_can_check_the_hmod_before_its_commit() {
     let api = recorded(vec![
         (
             "repos/acme/zoom/releases/latest",
@@ -113,7 +113,10 @@ fn a_release_with_no_hnmod_falls_back_to_its_commit_and_remembers_a_content_mod(
     ]);
     let found = resolve(&link("https://github.com/acme/zoom"), &api).unwrap();
     assert_eq!(found.asset, None);
-    assert_eq!(found.content_only.as_deref(), Some("zoom.hmod"));
+    assert_eq!(
+        found.hmod.as_ref().map(|file| file.name.as_str()),
+        Some("zoom.hmod")
+    );
     assert_eq!(found.commit, SHA);
 }
 
@@ -228,6 +231,7 @@ fn mod_folders_are_found_wherever_they_are_and_not_searched_inside() {
         &root.join(".git/x/horizon-mixin.toml"),
         &mixin("hidden", true),
     );
+    write(&root.join("example/horizon-mod.toml"), "[native");
     let ids: Vec<String> = find_mods(&root)
         .unwrap()
         .into_iter()
@@ -258,6 +262,9 @@ fn a_mod_folder_packs_into_a_bundle_the_registry_checks_accept() {
         ("zoom", "0.1.0")
     );
     assert_eq!(packed.sha256, sha256(&bytes));
+    let hmod = checked_hmod(&bytes, &root.join("out")).unwrap().unwrap();
+    assert_eq!(hmod.sha256, packed.sha256);
+    assert_eq!(fs::read(hmod.file).unwrap(), bytes);
     let read = format::Bundle::read(&packed.file).unwrap();
     assert!(read.files.contains_key("mixins/zoom/src/zoom.rs"));
     assert!(read.files.contains_key("mixins/zoom/data/a.json"));
@@ -269,6 +276,62 @@ fn a_mod_folder_packs_into_a_bundle_the_registry_checks_accept() {
     }
     assert!(!read.files.keys().any(|n| n.contains("logo")));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn current_native_release_is_reported_before_installation() {
+    use std::io::Write;
+
+    let root = tree("current-release");
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let manifest = format!(
+        "id = 'zoom'\nname = 'Zoom'\nversion = '1.0.0'\napi = '0.2'\n[native]\ngame = '26.3'\nhorizon = '{SHA}'\nmixins = '{SHA2}'\n"
+    );
+    for (name, bytes) in [
+        ("horizon-mod.toml", manifest.as_bytes()),
+        ("Cargo.toml", b"[package]\nname = 'zoom'\n"),
+        ("src/lib.rs", b""),
+    ] {
+        archive
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    let bytes = archive.finish().unwrap().into_inner();
+    let error = checked_hmod(&bytes, &root).unwrap_err();
+    assert!(
+        error.contains(SHA) && error.contains("native mod SDK"),
+        "{error}"
+    );
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir(&root).unwrap();
+}
+
+#[test]
+fn a_github_native_archive_with_content_is_refused_before_installation() {
+    use std::io::Write;
+
+    let root = tree("mixed-release");
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let native = json!({
+        "schema": 1, "id": "zoom", "version": "0.1.0", "game": "26.3",
+        "horizon": SHA, "mixins": SHA2,
+    });
+    let mixin = mixin("zoom", true);
+    for (name, text) in [
+        ("horizon-native.json", native.to_string()),
+        ("mixins/zoom/horizon-mixin.toml", mixin),
+        ("horizon-mod.toml", "id = 'zoom'\nname = 'Zoom'\nversion = '0.1.0'\napi = '0.2'\ncapabilities = ['registries']\n".into()),
+        ("assets/zoom/lang/en_us.json", "{}".into()),
+    ] {
+        archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        archive.write_all(text.as_bytes()).unwrap();
+    }
+    let bytes = archive.finish().unwrap().into_inner();
+    let error = checked_hmod(&bytes, &root).unwrap_err();
+    assert!(error.contains("native and content"), "{error}");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir(&root).unwrap();
 }
 
 #[test]
@@ -353,7 +416,7 @@ fn installing_records_the_origin_and_updates_follow_releases_or_the_head() {
         tag: None,
         commit: SHA.into(),
         asset: None,
-        content_only: None,
+        hmod: None,
     };
     let kept = ready.file.clone();
     let origin = install(&home, &found, &ready).unwrap();

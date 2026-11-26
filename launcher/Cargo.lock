@@ -2769,6 +2769,7 @@ dependencies = [
  "horizon-shader-api",
  "log",
  "minisign-verify",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

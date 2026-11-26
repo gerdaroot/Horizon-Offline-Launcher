@@ -618,10 +618,19 @@ pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
     let mut paths: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod"));
+    paths.retain(|p| p.is_file() && horizon_mods::index::native::is_file(p));
     paths.sort();
     let mut count = 0;
     for path in paths {
+        if path.extension().is_some_and(|ext| ext == "hmod")
+            && horizon_mods::Package::read(&path).is_ok_and(|package| {
+                !crate::browser::java::is_enabled(home, &package.manifest.id)
+                    || (package.runtime_problem().is_none()
+                        && !horizon_mods::index::native::holds(&path))
+            })
+        {
+            continue;
+        }
         let bundle = horizon_mods::index::native::Bundle::read(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         if !crate::browser::java::is_enabled(home, &bundle.manifest.id) {
@@ -757,6 +766,12 @@ impl Injection {
 /// The bundles in `folder`: the folder itself when it is one (a `horizon-mixin.toml`, or an
 /// unpacked `.hnmod`: `horizon-native.json` and `mixins/<id>/`), else each of its subfolders that is.
 pub fn bundles(folder: &Path) -> Result<Vec<Bundle>, String> {
+    if folder.is_file() && folder.extension().is_some_and(|ext| ext == "hmod") {
+        let package = horizon_mods::Package::read(folder)?;
+        if let Some(problem) = package.runtime_problem() {
+            return Err(problem);
+        }
+    }
     if let Some(found) = bundle_in(folder)? {
         return Ok(vec![found]);
     }
@@ -772,6 +787,12 @@ pub fn bundles(folder: &Path) -> Result<Vec<Bundle>, String> {
         found.extend(bundle_in(&dir)?);
     }
     if found.is_empty() {
+        if folder.join(horizon_mods::manifest::MANIFEST).is_file() {
+            let package = horizon_mods::Package::read(folder)?;
+            if let Some(problem) = package.runtime_problem() {
+                return Err(problem);
+            }
+        }
         return Err(format!(
             "{} holds no native mod ({MANIFEST} or {NATIVE_MANIFEST}).",
             folder.display()

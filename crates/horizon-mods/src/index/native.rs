@@ -49,10 +49,7 @@ pub struct Manifest {
 }
 
 pub fn revision(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::manifest::lower_hex(value, 40)
 }
 
 impl Manifest {
@@ -126,6 +123,16 @@ pub fn allowed(rest: &str) -> bool {
 
 impl Bundle {
     pub fn read(path: &Path) -> Result<Self, String> {
+        if !holds(path) && crate::Package::has_manifest(path) {
+            let package = crate::Package::read(path)?;
+            if let Some(problem) = package.runtime_problem() {
+                return Err(problem);
+            }
+            return Err(match package.kind() {
+                crate::PackageKind::LegacyWasm => WASM_GONE.into(),
+                _ => "content mod belongs in horizon-mods".into(),
+            });
+        }
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut files = BTreeMap::new();
@@ -159,7 +166,13 @@ impl Bundle {
                         .take(1 << 20)
                         .read_to_string(&mut text)
                         .map_err(|e| format!("{name}: {e}"))?;
-                    content_id = Some(crate::Manifest::parse(&text)?.id);
+                    let manifest = crate::Manifest::parse(&text)?;
+                    if manifest.native.is_some() || manifest.wasm.is_some() {
+                        return Err(format!(
+                            "{name}: code declaration conflicts with legacy {MANIFEST}"
+                        ));
+                    }
+                    content_id = Some(manifest.id);
                 }
                 continue;
             }

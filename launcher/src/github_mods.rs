@@ -146,8 +146,8 @@ pub struct Resolved {
     pub commit: String,
     /// The release's `.hnmod`, installed as it is when there is one.
     pub asset: Option<Asset>,
-    /// A release that ships only a content mod (`.hmod`): not supported here yet.
-    pub content_only: Option<String>,
+    /// A release `.hmod` to classify when there is no `.hnmod`.
+    pub hmod: Option<Asset>,
 }
 
 impl Resolved {
@@ -236,8 +236,8 @@ fn default_head(api: Api, link: &Link) -> Result<String, String> {
     commit_of(api, link, branch)
 }
 
-/// The `.hnmod` of a release's JSON (and a lone `.hmod`, which is not installed here).
-fn assets(release: &serde_json::Value, link: &Link) -> (Option<Asset>, Option<String>) {
+/// Prefer the release's legacy native file when both extensions are present.
+fn assets(release: &serde_json::Value, link: &Link) -> (Option<Asset>, Option<Asset>) {
     let prefix = format!(
         "https://github.com/{}/{}/releases/download/",
         link.owner, link.repo
@@ -250,7 +250,7 @@ fn assets(release: &serde_json::Value, link: &Link) -> (Option<Asset>, Option<St
         list.iter()
             .filter(move |a| a["name"].as_str().is_some_and(|n| n.ends_with(ext)))
     };
-    let hnmod = named(".hnmod").find_map(|a| {
+    let asset = |a: &serde_json::Value| {
         let url = a["browser_download_url"].as_str()?.to_owned();
         let name = a["name"].as_str()?.to_owned();
         // Only this repository's own release files.
@@ -263,10 +263,13 @@ fn assets(release: &serde_json::Value, link: &Link) -> (Option<Asset>, Option<St
                 .filter(|d| d.len() == 64)
                 .map(str::to_ascii_lowercase),
         })
-    });
-    let hmod = named(".hmod")
-        .find_map(|a| a["name"].as_str().map(str::to_owned))
-        .filter(|_| hnmod.is_none());
+    };
+    let hnmod = named(".hnmod").find_map(asset);
+    let hmod = if hnmod.is_none() {
+        named(".hmod").find_map(asset)
+    } else {
+        None
+    };
     (hnmod, hmod)
 }
 
@@ -275,14 +278,14 @@ fn from_release(api: Api, link: &Link, release: &serde_json::Value) -> Result<Re
         .as_str()
         .ok_or("GitHub did not name the release's tag.")?
         .to_owned();
-    let (asset, content_only) = assets(release, link);
+    let (asset, hmod) = assets(release, link);
     Ok(Resolved {
         owner: link.owner.clone(),
         repo: link.repo.clone(),
         commit: commit_of(api, link, &tag)?,
         tag: Some(tag),
         asset,
-        content_only,
+        hmod,
     })
 }
 
@@ -293,7 +296,7 @@ fn at_commit(commit: String, link: &Link) -> Resolved {
         tag: None,
         commit,
         asset: None,
-        content_only: None,
+        hmod: None,
     }
 }
 
@@ -392,19 +395,48 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Reads `bytes` as `.hnmod`, with the registry's checks, into a file `Packed` names.
 fn checked(bytes: &[u8], dir: &Path) -> Result<Packed, String> {
-    let sum = sha256(bytes);
-    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let file = dir.join(format!("{}.hnmod", &sum[..16]));
-    fs::write(&file, bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+    let file = stage(bytes, dir, "hnmod")?;
     let bundle = format::Bundle::read(&file).inspect_err(|_| {
         let _ = fs::remove_file(&file);
     })?;
-    Ok(Packed {
+    Ok(packed(bytes, file, bundle))
+}
+
+fn stage(bytes: &[u8], dir: &Path, extension: &str) -> Result<PathBuf, String> {
+    let sum = sha256(bytes);
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(format!("{sum}.{extension}"));
+    fs::write(&file, bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(file)
+}
+
+fn packed(bytes: &[u8], file: PathBuf, bundle: format::Bundle) -> Packed {
+    Packed {
         id: bundle.manifest.id,
         version: bundle.manifest.version,
         file,
-        sha256: sum,
-    })
+        sha256: sha256(bytes),
+    }
+}
+
+fn checked_hmod(bytes: &[u8], dir: &Path) -> Result<Option<Packed>, String> {
+    let file = stage(bytes, dir, "hmod")?;
+    let result = if format::holds(&file) {
+        if horizon_mods::Package::has_manifest(&file) {
+            Err("This legacy .hmod combines native and content files; this GitHub installer cannot install both parts.".into())
+        } else {
+            format::Bundle::read(&file).map(|bundle| Some(packed(bytes, file.clone(), bundle)))
+        }
+    } else {
+        horizon_mods::Package::read(&file).and_then(|package| match package.runtime_problem() {
+            Some(problem) => Err(problem),
+            None => Ok(None),
+        })
+    };
+    if !matches!(result, Ok(Some(_))) {
+        let _ = fs::remove_file(&file);
+    }
+    result
 }
 
 /// Every mod folder under `root`: a `horizon-mixin.toml`, or an unpacked `.hnmod`
@@ -527,22 +559,33 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-/// Downloads what `found` names and checks it: the release's `.hnmod` (its SHA-256 compared with
-/// GitHub's when it reports one), else the mods of the commit's archive, each packed. A repository
-/// of several mods gives several `Packed`. Nothing is installed.
+fn download_asset(asset: &Asset) -> Result<Vec<u8>, String> {
+    let bytes = download(&asset.url)?;
+    if asset
+        .sha256
+        .as_ref()
+        .is_some_and(|expected| sha256(&bytes) != *expected)
+    {
+        return Err(format!(
+            "{} does not match the checksum GitHub lists for it.",
+            asset.name
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Checks the release bundle against GitHub's SHA-256 when present. When the release has only
+/// content or has no bundle, check the native mods from the pinned commit. Nothing is installed.
 pub fn fetch(found: &Resolved) -> Result<Vec<Packed>, String> {
     let dir = scratch(&found.commit);
     if let Some(asset) = &found.asset {
-        let bytes = download(&asset.url)?;
-        if let Some(expected) = &asset.sha256 {
-            if sha256(&bytes) != *expected {
-                return Err(format!(
-                    "{} does not match the checksum GitHub lists for it.",
-                    asset.name
-                ));
-            }
-        }
+        let bytes = download_asset(asset)?;
         return Ok(vec![checked(&bytes, &dir)?]);
+    }
+    if let Some(asset) = &found.hmod {
+        if let Some(packed) = checked_hmod(&download_asset(asset)?, &dir)? {
+            return Ok(vec![packed]);
+        }
     }
     let url = format!(
         "https://codeload.github.com/{}/{}/tar.gz/{}",
@@ -551,11 +594,12 @@ pub fn fetch(found: &Resolved) -> Result<Vec<Packed>, String> {
     let top = native_mods::unpack_archive(&url, &dir.join("source"), MAX_ARCHIVE)?;
     let mods = find_mods(&top)?;
     if mods.is_empty() {
-        return Err(match &found.content_only {
-            Some(file) => format!(
-                "{} ships {file}, a content mod: installing .hmod files from GitHub is not supported yet.",
-                found.label()
-            ),
+        return Err(match &found.hmod {
+            Some(asset) => crate::i18n::trf(
+                "The source of {source}. Its release ships {file}, a content mod: installing those from GitHub is not supported yet.",
+                &[("source", &found.label()), ("file", &asset.name)],
+            )
+            .to_string(),
             None => format!(
                 "{} holds no native mod (a folder with horizon-mixin.toml, or an unpacked .hnmod).",
                 found.label()
@@ -644,14 +688,19 @@ pub fn install(home: &Path, found: &Resolved, packed: &Packed) -> Result<Origin,
     }
     fs::create_dir_all(home.join(INSTALLED)).map_err(|e| e.to_string())?;
     fs::copy(&packed.file, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let asset = if packed.file.extension().is_some_and(|ext| ext == "hmod") {
+        found.hmod.as_ref()
+    } else {
+        found.asset.as_ref()
+    };
     let record = Origin {
         id: packed.id.clone(),
         version: packed.version.clone(),
         owner: found.owner.clone(),
         repo: found.repo.clone(),
-        tag: found.asset.as_ref().and(found.tag.clone()),
+        tag: asset.and(found.tag.clone()),
         commit: found.commit.clone(),
-        asset: found.asset.as_ref().map(|a| a.name.clone()),
+        asset: asset.map(|a| a.name.clone()),
         sha256: packed.sha256.clone(),
     };
     let text = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;

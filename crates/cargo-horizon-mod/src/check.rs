@@ -90,6 +90,7 @@ impl Report {
 /// The kind a file's extension says.
 pub fn kind_of(path: &Path) -> Option<Kind> {
     match path.extension()?.to_str()? {
+        "hmod" if index::native::holds(path) => Some(Kind::NativeMod),
         "hmod" => Some(Kind::Mod),
         "hnmod" => Some(Kind::NativeMod),
         "hpack" => Some(Kind::Modpack),
@@ -138,12 +139,16 @@ pub fn check(
 /// A mod is content only: WebAssembly code mods don't run any more, code mods are native
 /// (`.hnmod`, docs/native-mods.md). `inspect` already read its content as the game does.
 fn content_only(path: &Path) -> Result<(), String> {
-    match Package::read(path)?.wasm {
-        Some(_) => Err(
+    let package = Package::read(path)?;
+    if let Some(problem) = package.runtime_problem() {
+        return Err(problem);
+    }
+    match package.kind() {
+        horizon_mods::PackageKind::LegacyWasm => Err(
             "it has WebAssembly code, which Horizon doesn't run any more: make it a native mod (docs/native-mods.md)"
                 .into(),
         ),
-        None => Ok(()),
+        _ => Ok(()),
     }
 }
 

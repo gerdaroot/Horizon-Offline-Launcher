@@ -1,7 +1,9 @@
 //! `horizon-mod.toml`, a mod's manifest, and the `.hmod` file around it.
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fmt,
+    fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -28,6 +30,8 @@ const RESERVED_NAMESPACES: [&str; 3] = ["minecraft", "c", "horizon"];
 pub const STORAGE_DIR: &str = ".horizon-mod-data";
 /// The biggest `mod.wasm` a mod may ship.
 const MAX_WASM: u64 = 32 << 20;
+const MAX_CURRENT_WASM: u64 = 64 << 20;
+const MAX_MANIFEST: u64 = 32 << 20;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +44,11 @@ pub struct Manifest {
     pub description: String,
     #[serde(default)]
     pub authors: Vec<String>,
+    pub credits: Option<String>,
+    pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub homepage: Option<String>,
+    pub issues: Option<String>,
     /// The API line the mod was built for: `0.1`, or `0.2` for content.
     pub api: String,
     #[serde(default)]
@@ -58,6 +67,55 @@ pub struct Manifest {
     /// accepted here, so the manifest keeps loading once it is promoted.
     #[serde(default)]
     pub experimental: Vec<Capability>,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, crate::dependencies::Dependency>,
+    pub native: Option<Native>,
+    pub wasm: Option<Wasm>,
+    pub wasm_memory_mib: Option<u16>,
+    #[serde(default)]
+    pub inject: Vec<toml::Table>,
+    #[serde(default)]
+    pub internals: Vec<toml::Table>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Native {
+    pub game: String,
+    pub horizon: String,
+    pub mixins: String,
+    #[serde(default)]
+    pub module: Vec<toml::Table>,
+    #[serde(default)]
+    pub mixin: Vec<toml::Table>,
+    #[serde(default, rename = "loop")]
+    pub loops: Vec<toml::Table>,
+    #[serde(default)]
+    pub bridge: Vec<toml::Table>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Wasm {
+    pub sha512: String,
+    pub toolchain: String,
+    #[serde(default)]
+    pub linked: BTreeMap<String, String>,
+    pub built_with: Option<String>,
+}
+
+pub(crate) fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+pub(crate) fn lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -66,10 +124,16 @@ pub enum Side {
     /// Runs in the player's game only (HUD, keys, chat commands).
     #[default]
     Client,
-    /// Runs where the world is simulated (rules, blocks): `api = "0.3"`.
+    /// Runs on a dedicated server.
     Server,
     /// Both, and the server tells clients which version it expects.
     Both,
+}
+
+impl Side {
+    pub fn includes(self, installation: Side) -> bool {
+        self == Self::Both || self == installation
+    }
 }
 
 /// What a mod may do beyond writing its log. Each is a WIT interface the
@@ -219,13 +283,27 @@ impl fmt::Display for Capability {
 }
 
 impl Manifest {
+    /// In the original Offline content format, `side` only controlled the
+    /// multiplayer mod list. Older manifests may have put client/default
+    /// content on dedicated servers. Current-only fields identify manifests
+    /// that use the newer installation-side convention.
+    pub fn content_for(&self, installation: Side) -> bool {
+        self.side.includes(installation)
+            || (self.side == Side::Client
+                && installation == Side::Server
+                && self.dependencies.is_empty()
+                && self.native.is_none()
+                && self.wasm.is_none()
+                && self.license.is_none()
+                && self.license_url.is_none()
+                && self.credits.is_none()
+                && self.homepage.is_none()
+                && self.issues.is_none())
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
         let m: Manifest = toml::from_str(text).map_err(|e| format!("{MANIFEST}: {e}"))?;
-        let id_ok = (1..=64).contains(&m.id.len())
-            && m.id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-        if !id_ok {
+        if !valid_id(&m.id) {
             return Err(format!(
                 "{MANIFEST}: id {:?} is not [a-z0-9_]{{1,64}}",
                 m.id
@@ -238,13 +316,70 @@ impl Manifest {
                 APIS.join(" and ")
             ));
         }
+        let current = m.api == "0.2";
+        if m.native.is_some() && m.wasm.is_some() {
+            return Err(format!(
+                "{MANIFEST}: [native] and [wasm] are mutually exclusive"
+            ));
+        }
+        if (m.native.is_some() || m.wasm.is_some() || !m.dependencies.is_empty()) && !current {
+            return Err(format!(
+                "{MANIFEST}: [native], [wasm] and [dependencies] require api = \"0.2\""
+            ));
+        }
+        if let Some(native) = &m.native
+            && (native.game.is_empty()
+                || !lower_hex(&native.horizon, 40)
+                || !lower_hex(&native.mixins, 40))
+        {
+            return Err(format!(
+                "{MANIFEST}: [native] needs a game version and exact horizon and mixins revisions (40 lowercase hex digits)"
+            ));
+        }
+        if (!m.internals.is_empty() || !m.inject.is_empty()) && m.native.is_none() {
+            return Err(format!("{MANIFEST}: internals and inject require [native]"));
+        }
+        if let Some(wasm) = &m.wasm {
+            if !lower_hex(&wasm.sha512, 128) {
+                return Err(format!(
+                    "{MANIFEST}: wasm.sha512 must be 128 lowercase hex digits"
+                ));
+            }
+            if wasm.toolchain.is_empty() || wasm.built_with.as_ref().is_some_and(String::is_empty) {
+                return Err(format!(
+                    "{MANIFEST}: wasm.toolchain and wasm.built_with cannot be empty"
+                ));
+            }
+            for (id, hash) in &wasm.linked {
+                if !valid_id(id) || !lower_hex(hash, 128) {
+                    return Err(format!(
+                        "{MANIFEST}: wasm.linked needs mod IDs and SHA-512 hashes"
+                    ));
+                }
+            }
+        }
+        if m.wasm_memory_mib
+            .is_some_and(|size| !(1..=4096).contains(&size))
+        {
+            return Err(format!(
+                "{MANIFEST}: wasm_memory_mib must be from 1 to 4096"
+            ));
+        }
+        for (id, dependency) in &m.dependencies {
+            dependency.check(id)?;
+        }
         if m.capabilities.contains(&Capability::Registries) && m.api == API {
             return Err(format!(
                 "{MANIFEST}: capability registries needs api = \"0.2\""
             ));
         }
         let server = m.side == Side::Server;
-        if server != (m.api == SERVER_API) {
+        let current_server = current
+            && server
+            && (m.native.is_some()
+                || m.wasm.is_some()
+                || m.capabilities.contains(&Capability::Registries));
+        if !current_server && server != (m.api == SERVER_API) {
             return Err(format!(
                 "{MANIFEST}: a server mod is side = \"server\" with api = \"{SERVER_API}\", and only it"
             ));
@@ -252,9 +387,13 @@ impl Manifest {
         if let Some(c) = m
             .capabilities
             .iter()
-            .find(|c| c.on_server() != server && **c != Capability::Storage)
+            .find(|c| c.on_server() != (m.api == SERVER_API) && **c != Capability::Storage)
         {
-            let side = if server { "client" } else { "server" };
+            let side = if m.api == SERVER_API {
+                "client"
+            } else {
+                "server"
+            };
             return Err(format!("{MANIFEST}: capability {c} is for {side} mods"));
         }
         if let Some(c) = m
@@ -320,47 +459,209 @@ pub struct Package {
     /// None for a content-only mod (capability `registries`, no code).
     pub wasm: Option<Vec<u8>>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageKind {
+    Content,
+    Native,
+    Wasm,
+    LegacyWasm,
+}
+
+/// Read through the end of an entry (which checks ZIP CRC), subject to a size cap.
+fn read_limited(reader: impl Read, name: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{name}: {e}"))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("{name} is over {} MiB", limit >> 20));
+    }
+    Ok(bytes)
+}
+
+fn check_code_zip(zip: &mut zip::ZipArchive<File>) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let mut paths = BTreeSet::new();
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index).map_err(|e| e.to_string())?;
+        let name = entry.name().map_err(|e| e.to_string())?;
+        let dir = entry.is_dir();
+        let name = if dir {
+            name.trim_end_matches('/')
+        } else {
+            &name
+        };
+        let file_type = if dir { 0o040000 } else { 0o100000 };
+        if name.contains(['\\', ':'])
+            || name
+                .split('/')
+                .any(|part| part.is_empty() || matches!(part, "." | ".."))
+            || entry.unix_mode().is_some_and(|mode| {
+                let kind = mode & 0o170000;
+                kind != 0 && kind != file_type || !dir && mode & 0o111 != 0
+            })
+            || dir && entry.size() != 0
+        {
+            return Err(format!("invalid mod archive path: {name}"));
+        }
+        if !paths.insert(name.to_owned()) {
+            return Err(format!("duplicate mod archive path: {name}"));
+        }
+        let name_lower = name.to_ascii_lowercase();
+        if !dir
+            && (name != WASM && name_lower.ends_with(".wasm")
+                || [
+                    ".dll", ".so", ".dylib", ".exe", ".jar", ".bat", ".cmd", ".sh", ".ps1", ".com",
+                    ".msi",
+                ]
+                .iter()
+                .any(|ext| name_lower.ends_with(ext)))
+        {
+            return Err(format!("unexpected executable in mod archive: {name}"));
+        }
+    }
+    Ok(())
+}
+
 impl Package {
     /// A `.hmod` (a zip holding `horizon-mod.toml`, `mod.wasm` and, for
     /// content, `assets/` and `data/`) or a folder holding the same.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let (toml, wasm) = if path.is_dir() {
-            let toml = std::fs::read_to_string(path.join(MANIFEST));
-            let wasm = path.join(WASM);
-            let wasm = match wasm.exists() {
-                true => Some(std::fs::read(wasm).map_err(|e| format!("{WASM}: {e}"))?),
-                false => None,
+        if path.is_dir() {
+            let manifest =
+                File::open(path.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
+            let manifest = Self::parse_bytes(read_limited(manifest, MANIFEST, MAX_MANIFEST)?)?;
+            let has_file = |name: &str| path.join(name).is_file();
+            Self::check_layout(&manifest, has_file)?;
+            let wasm = if has_file(WASM) {
+                let file = File::open(path.join(WASM)).map_err(|e| format!("{WASM}: {e}"))?;
+                Some(read_limited(file, WASM, Self::wasm_limit(&manifest))?)
+            } else {
+                None
             };
-            (toml.map_err(|e| format!("{MANIFEST}: {e}"))?, wasm)
+            Self::from_parts(manifest, wasm)
         } else {
-            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let file = File::open(path).map_err(|e| e.to_string())?;
             let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-            let mut entry = |name: &str| -> Result<Option<Vec<u8>>, String> {
+            let entry = |zip: &mut zip::ZipArchive<File>,
+                         name: &str,
+                         limit: u64|
+             -> Result<Option<Vec<u8>>, String> {
                 let f = match zip.by_name(name) {
                     Ok(f) => f,
                     Err(zip::result::ZipError::FileNotFound) => return Ok(None),
                     Err(e) => return Err(format!("{name}: {e}")),
                 };
-                let mut out = Vec::new();
-                f.take(MAX_WASM + 1)
-                    .read_to_end(&mut out)
-                    .map_err(|e| e.to_string())?;
-                Ok(Some(out))
+                read_limited(f, name, limit).map(Some)
             };
-            let toml = entry(MANIFEST)?.ok_or_else(|| format!("{MANIFEST}: missing"))?;
-            let toml = String::from_utf8(toml).map_err(|_| format!("{MANIFEST}: not UTF-8"))?;
-            (toml, entry(WASM)?)
-        };
-        if wasm.as_ref().is_some_and(|w| w.len() as u64 > MAX_WASM) {
-            return Err(format!("{WASM} is over {} MiB", MAX_WASM >> 20));
+            let bytes = entry(&mut zip, MANIFEST, MAX_MANIFEST)?
+                .ok_or_else(|| format!("{MANIFEST}: missing"))?;
+            let manifest = Self::parse_bytes(bytes)?;
+            Self::check_layout(&manifest, |name| zip.index_for_name(name).is_some())?;
+            if manifest.native.is_some() || manifest.wasm.is_some() {
+                check_code_zip(&mut zip)?;
+            }
+            let wasm = entry(&mut zip, WASM, Self::wasm_limit(&manifest))?;
+            Self::from_parts(manifest, wasm)
         }
-        let manifest = Manifest::parse(&toml)?;
-        if wasm.is_none() && !manifest.capabilities.contains(&Capability::Registries) {
+    }
+
+    fn parse_bytes(bytes: Vec<u8>) -> Result<Manifest, String> {
+        let text = std::str::from_utf8(&bytes).map_err(|_| format!("{MANIFEST}: not UTF-8"))?;
+        Manifest::parse(text)
+    }
+
+    fn wasm_limit(manifest: &Manifest) -> u64 {
+        if manifest.wasm.is_some() {
+            MAX_CURRENT_WASM
+        } else {
+            MAX_WASM
+        }
+    }
+
+    fn check_layout(manifest: &Manifest, has_file: impl Fn(&str) -> bool) -> Result<(), String> {
+        let cargo = has_file("Cargo.toml");
+        let lib = has_file("src/lib.rs");
+        if (manifest.native.is_some() || manifest.wasm.is_some()) && has_file("horizon-native.json")
+        {
+            return Err(format!(
+                "{MANIFEST}: code declaration conflicts with legacy horizon-native.json"
+            ));
+        }
+        if manifest.native.is_some() && has_file(WASM) {
+            return Err(format!(
+                "{WASM}: native packages cannot contain WebAssembly"
+            ));
+        }
+        let needs_source = manifest.native.is_some()
+            || manifest
+                .wasm
+                .as_ref()
+                .is_some_and(|m| m.built_with.is_none());
+        if needs_source && (!cargo || !lib) {
+            return Err(format!(
+                "{MANIFEST}: source package needs Cargo.toml and src/lib.rs"
+            ));
+        }
+        if (cargo || lib) && manifest.native.is_none() && manifest.wasm.is_none() {
+            return Err(format!(
+                "{MANIFEST}: Cargo.toml and src/lib.rs require [native] or [wasm]"
+            ));
+        }
+        if manifest.wasm.is_some() && !has_file(WASM) {
+            return Err(format!("{WASM}: missing from [wasm] package"));
+        }
+        Ok(())
+    }
+
+    fn from_parts(manifest: Manifest, wasm: Option<Vec<u8>>) -> Result<Self, String> {
+        if let Some(declared) = &manifest.wasm {
+            use sha2::{Digest, Sha512};
+            let bytes = wasm.as_deref().ok_or_else(|| format!("{WASM}: missing"))?;
+            if !bytes.starts_with(b"\0asm") {
+                return Err(format!("{WASM}: invalid WebAssembly header"));
+            }
+            if format!("{:x}", Sha512::digest(bytes)) != declared.sha512 {
+                return Err(format!("{WASM}: SHA-512 does not match {MANIFEST}"));
+            }
+        }
+        if wasm.is_none()
+            && manifest.native.is_none()
+            && !manifest.capabilities.contains(&Capability::Registries)
+        {
             return Err(format!(
                 "{WASM}: missing (only a content mod, with capability registries, may have no code)"
             ));
         }
         Ok(Package { manifest, wasm })
+    }
+
+    pub fn kind(&self) -> PackageKind {
+        if self.manifest.native.is_some() {
+            PackageKind::Native
+        } else if self.manifest.wasm.is_some() {
+            PackageKind::Wasm
+        } else if self.wasm.is_some() {
+            PackageKind::LegacyWasm
+        } else {
+            PackageKind::Content
+        }
+    }
+
+    /// A current code package's requirements this Offline build cannot provide.
+    pub fn runtime_problem(&self) -> Option<String> {
+        if let Some(native) = &self.manifest.native {
+            return Some(format!(
+                "{} {} needs the native mod SDK and host for Horizon {} (Minecraft {}); this Horizon Offline build uses legacy mixin bundles",
+                self.manifest.id, self.manifest.version, native.horizon, native.game,
+            ));
+        }
+        self.manifest.wasm.as_ref().map(|wasm| format!(
+            "{} {} needs the WebAssembly mod host (built with {}); this Horizon Offline build has no WebAssembly mod host",
+            self.manifest.id, self.manifest.version, wasm.toolchain,
+        ))
     }
     /// Whether the mod at `path` (a `.hmod` or a folder) has a [`MANIFEST`]: content, or a legacy
     /// WebAssembly mod. A `.hmod` holding only native code has none.
@@ -430,6 +731,110 @@ version = "0.1.0"
 api = "0.1"
 capabilities = ["game-read", "hud"]
 "#;
+
+    const CONTENT: &str = "id = 'sample'\nname = 'Sample'\nversion = '1.2.3'\napi = '0.2'\ncapabilities = ['registries']\n";
+
+    fn zip_package(
+        name: &str,
+        manifest: &str,
+        files: &[(&str, &[u8])],
+    ) -> (Result<Package, String>, bool) {
+        use std::io::Write;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (path, bytes) in
+            std::iter::once((MANIFEST, manifest.as_bytes())).chain(files.iter().copied())
+        {
+            zip.start_file(path, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        let path = std::env::temp_dir().join(format!("horizon-{name}-{}.hmod", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let result = Package::read(&path);
+        let unchanged = std::fs::read(&path).unwrap() == bytes;
+        std::fs::remove_file(path).unwrap();
+        (result, unchanged)
+    }
+
+    #[test]
+    fn current_native_manifest_reads_the_release_archive_in_place() {
+        let manifest = format!(
+            "{CONTENT}[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let (package, unchanged) = zip_package(
+            "native-release",
+            &manifest,
+            &[
+                ("Cargo.toml", b"[package]\nname = 'source_name'\n"),
+                ("src/lib.rs", b"// sample"),
+                ("uses.json", b"{}"),
+                ("assets/sample/lang/en_us.json", b"{}"),
+            ],
+        );
+        let package = package.unwrap();
+        assert_eq!(package.manifest.id, "sample");
+        assert_eq!(package.kind(), PackageKind::Native);
+        assert!(package.runtime_problem().unwrap().contains(&"a".repeat(40)));
+        assert!(unchanged);
+    }
+
+    #[test]
+    fn current_native_manifest_requires_the_source_root() {
+        let manifest = format!(
+            "{CONTENT}[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let (package, _) = zip_package("native-no-source", &manifest, &[]);
+        assert!(matches!(package, Err(e) if e.contains("Cargo.toml")));
+    }
+
+    #[test]
+    fn current_wasm_manifest_checks_sha512() {
+        let wasm = b"\0asm\x01\0\0\0";
+        let hash = "e20ed12e5a7e3bdee30a3a4f26c2813edb79b8fbead058d15688f104f6039a5a3de349e9cbbdd5d9a68f306d0804914e45124f0dedc0bcbefa7b30dd778aa6c0";
+        let manifest = format!(
+            "{CONTENT}[wasm]\nsha512 = '{hash}'\ntoolchain = '1.95.0'\nbuilt_with = 'example converter'\n"
+        );
+        let (package, _) = zip_package("wasm-current", &manifest, &[(WASM, wasm)]);
+        let package = package.unwrap();
+        assert_eq!(package.kind(), PackageKind::Wasm);
+        assert!(package.runtime_problem().unwrap().contains("1.95.0"));
+        assert_eq!(package.wasm.as_deref(), Some(wasm.as_slice()));
+        let (changed, _) = zip_package("wasm-changed", &manifest, &[(WASM, b"\0asm\x01\0\0\x01")]);
+        assert!(matches!(changed, Err(e) if e.contains("SHA-512")));
+    }
+
+    #[test]
+    fn content_package_cannot_hide_a_source_crate() {
+        let (package, _) = zip_package("content-source", CONTENT, &[("Cargo.toml", b"[package]")]);
+        assert!(matches!(package, Err(e) if e.contains("[native]")));
+    }
+
+    #[test]
+    fn current_content_manifest_accepts_server_side_and_release_metadata() {
+        let text = format!(
+            "{CONTENT}side = 'server'\nlicense = 'MIT'\nhomepage = 'https://example.org/sample'\nissues = 'https://example.org/sample/issues'\n"
+        );
+        assert_eq!(Manifest::parse(&text).map(|m| m.side), Ok(Side::Server));
+    }
+
+    #[test]
+    fn legacy_default_content_can_still_load_on_a_dedicated_server() {
+        let legacy = Manifest::parse(CONTENT).unwrap();
+        assert!(legacy.content_for(Side::Server));
+        let client =
+            Manifest::parse(&format!("{CONTENT}license = 'MIT'\nside = 'client'\n")).unwrap();
+        assert!(client.content_for(Side::Client));
+        assert!(!client.content_for(Side::Server));
+        let server = Manifest::parse(&format!("{CONTENT}side = 'server'\n")).unwrap();
+        assert!(server.content_for(Side::Server));
+        assert!(!server.content_for(Side::Client));
+    }
 
     #[test]
     fn parses_and_checks_imports() {

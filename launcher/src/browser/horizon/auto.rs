@@ -111,8 +111,11 @@ pub fn decide<'a>(index: &'a Index, entry: &installed::Entry, ctx: &Context) -> 
 
 /// The blocks, items, entities, effects, menus and creative tabs a content mod adds.
 pub fn content_ids(path: &Path) -> Result<BTreeSet<String>, String> {
-    let manifest = horizon_mods::Package::read(path)?.manifest;
-    let c = horizon_mods::Content::read(path, &manifest)?;
+    let package = horizon_mods::Package::read(path)?;
+    if let Some(problem) = package.runtime_problem() {
+        return Err(problem);
+    }
+    let c = horizon_mods::Content::read(path, &package.manifest)?;
     let ids = c.blocks.iter().map(|b| format!("block {}", b.id));
     let ids = ids.chain(c.items.iter().map(|i| format!("item {}", i.id)));
     let ids = ids.chain(c.entity_types.iter().map(|e| format!("entity {}", e.id)));
